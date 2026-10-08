@@ -59,6 +59,18 @@ async function getReadingCount() {
     return parseInt(res.rows[0].count, 10);
 }
 
+async function listReadings(limit = 100) {
+    const res = await pool.query(
+        "SELECT id, timestamp, payload FROM telemetry_active_stream ORDER BY id DESC LIMIT $1",
+        [limit]
+    );
+    return res.rows.reverse().map(row => ({
+        id: row.id,
+        timestamp: row.timestamp,
+        ...(typeof row.payload === 'object' ? row.payload : JSON.parse(row.payload))
+    }));
+}
+
 async function closeStorage() {
     await pool.end();
 }
@@ -70,5 +82,6 @@ module.exports = {
     saveReading,
     getLatestReading,
     getReadingCount,
+    listReadings,
     closeStorage
 };
