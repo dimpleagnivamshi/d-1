@@ -88,6 +88,32 @@ async function main() {
                     return res.end();
                 }
 
+                // ==========================================
+                // DEVICE 1 CUSTOM INTERRUPT ROUTE
+                // ==========================================
+                if (req.method === "POST" && url.pathname === "/api/device1/interrupt") {
+                    let body = '';
+                    req.on('data', chunk => { body += chunk.toString(); });
+                    req.on('end', async () => {
+                        try {
+                            const parsed = JSON.parse(body);
+                            if (parsed.interrupt) {
+                                await generator.stop();
+                            } else {
+                                await generator.start();
+                            }
+                            console.log(`Device 1 Interrupted: ${parsed.interrupt}`);
+                            res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+                            res.end(JSON.stringify({ success: true, interrupted: parsed.interrupt }));
+                        } catch (err) {
+                            res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+                            res.end(JSON.stringify({ error: "Invalid JSON provided" }));
+                        }
+                    });
+                    return;
+                }
+                // ==========================================
+
                 const handled = await routes.handle(req, res, url);
                 if (handled !== false) return;
                 res.writeHead(404, { "Content-Type": "application/json; charset=utf-8" });
