@@ -2,7 +2,6 @@ const http = require("node:http");
 const fs = require("node:fs");
 const path = require("node:path");
 
-// Automatically locate where dashboard.html lives across any folder structure
 let projectRoot = __dirname;
 const possibleRoots = [
     __dirname,
@@ -30,23 +29,12 @@ function loadConfig() {
         process.loadEnvFile(envFile);
     }
 
-    const databaseUrlStr = process.env.DATABASE_URL || "postgresql://neondb_owner:npg_O9ucklhRI0Eq@ep-red-sea-b4a065l9-pooler.c-6.us-east-2.aws.neon.tech/neondb?sslmode=require&channel_binding=require";
-    try {
-        new URL(databaseUrlStr);
-    } catch {
-        throw new Error("DATABASE_URL must be a valid PostgreSQL connection URL.");
+    const databaseUrlStr = process.env.DATABASE_URL;
+    if (!databaseUrlStr) {
+        throw new Error("DATABASE_URL must be configured.");
     }
 
     const secret = (process.env.FEED_CONTROL_SECRET || "default_secure_secret_12345").trim();
-
-    let frontendOrigin = "https://sensor-dashboard.getvoroa.com";
-    if (process.env.FRONTEND_ORIGIN) {
-        try {
-            const frontend = new URL(process.env.FRONTEND_ORIGIN);
-            frontendOrigin = frontend.origin;
-        } catch {}
-    }
-
     const rawPort = process.env.PORT || "3000";
     const port = Number(rawPort);
     const host = (process.env.HOST || "0.0.0.0").trim();
@@ -55,12 +43,11 @@ function loadConfig() {
     return {
         host,
         port,
-        frontendOrigin,
         feedControlSecret: secret
     };
 }
 
-function corsAllowed(req, res, config) {
+function corsAllowed(req, res) {
     res.setHeader("Vary", "Origin");
     const origin = req.headers.origin;
     if (!origin) return true;
@@ -92,7 +79,7 @@ async function main() {
                 return res.end(JSON.stringify({ status: "ok" }));
             }
             if (url.pathname.startsWith("/api/")) {
-                if (!corsAllowed(req, res, config)) {
+                if (!corsAllowed(req, res)) {
                     res.writeHead(403, { "Content-Type": "application/json; charset=utf-8" });
                     return res.end(JSON.stringify({ error: "Origin is not allowed." }));
                 }
@@ -100,39 +87,6 @@ async function main() {
                     res.writeHead(204);
                     return res.end();
                 }
-
-                // ==========================================
-                // DEVICE 1 CUSTOM INTERRUPT & STATUS ROUTES
-                // ==========================================
-                
-                // 1. Handle the manual interrupt toggle from the dashboard button
-                if (req.method === "POST" && url.pathname === "/api/device1/interrupt") {
-                    let body = '';
-                    req.on('data', chunk => { body += chunk.toString(); });
-                    req.on('end', () => {
-                        try {
-                            const parsed = JSON.parse(body);
-                            const result = generator.toggleInterrupt(parsed.interrupt);
-                            console.log(`Device 1 Interrupted: ${parsed.interrupt}`);
-                            res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-                            res.end(JSON.stringify(result));
-                        } catch (err) {
-                            res.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
-                            res.end(JSON.stringify({ error: "Invalid JSON provided" }));
-                        }
-                    });
-                    return; // Prevent passing to standard routes
-                }
-
-                // 2. Allow Device 2 to ping and check if Master is active and not interrupted
-                if (req.method === "GET" && url.pathname === "/api/feed/status") {
-                    const status = await generator.status();
-                    res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-                    // Returns true only if running AND not manually interrupted
-                    res.end(JSON.stringify({ running: status.running && !generator.interrupted }));
-                    return; // Prevent passing to standard routes
-                }
-                // ==========================================
 
                 const handled = await routes.handle(req, res, url);
                 if (handled !== false) return;
@@ -148,7 +102,7 @@ async function main() {
     });
 
     server.listen(config.port, config.host, () => {
-        console.log(`Sensor app listening on ${config.host}:${config.port} (Serving static from: ${projectRoot})`);
+        console.log(`d-1 app listening on ${config.host}:${config.port}`);
     });
 
     const shutdown = async () => {
@@ -178,7 +132,6 @@ function serveStatic(requestPath, res) {
     }
 
     const file = path.resolve(projectRoot, "." + decoded);
-    
     if (!file.startsWith(projectRoot) || !fs.existsSync(file)) {
         res.writeHead(404);
         return res.end("Not found");
