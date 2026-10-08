@@ -59,7 +59,14 @@ async function getReadingCount() {
     return parseInt(res.rows[0].count, 10);
 }
 
-async function listReadings(limit = 100) {
+async function listReadings(options = 100) {
+    let limit = 100;
+    if (typeof options === 'object' && options !== null) {
+        limit = options.limit || 100;
+    } else if (typeof options === 'number') {
+        limit = options;
+    }
+
     const res = await pool.query(
         "SELECT id, timestamp, payload FROM telemetry_active_stream ORDER BY id DESC LIMIT $1",
         [limit]
