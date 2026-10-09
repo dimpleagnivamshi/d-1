@@ -19,6 +19,50 @@ const COLOR_PALETTE = [
 let dashboardCharts = loadLayout();
 let dragSourceId = null;
 
+/* Only the ACTIVE device's page plots live. When this page becomes active it
+   reloads the last points of the shared series, so it continues where
+   Device 1 left off. */
+const MY_DEVICE = "Device 2";
+function isMine(row) {
+    return String(row.activeDevice || "").startsWith(MY_DEVICE);
+}
+
+let isPlotting = false;
+let rebuilding = false;
+let pendingRows = [];
+let lastPlottedId = 0;
+
+async function refreshCharts() {
+    const rows = await getLastLoggedRows(PLOT_MAX_POINTS).catch(function () {
+        return [];
+    });
+
+    dashboardCharts.forEach(function (cfg) {
+        createChart("chart_" + cfg.id, rows, {
+            x: cfg.x,
+            y: cfg.y,
+            color: cfg.color,
+            compact: true,
+            title: null,
+            timeFormat: cfg.timeFormat || "seconds",
+            aggregate: true
+        });
+        if (cfg.x === "timestamp") {
+            setChartPrecision("chart_" + cfg.id, cfg.timeFormat || "seconds");
+        }
+    });
+
+    if (rows.length) lastPlottedId = rows[rows.length - 1].id;
+}
+
+function plotRow(row) {
+    if (row.id <= lastPlottedId) return;
+    lastPlottedId = row.id;
+    dashboardCharts.forEach(function (cfg) {
+        appendPoint("chart_" + cfg.id, row, PLOT_MAX_POINTS);
+    });
+}
+
 /* =====================================================
    HELPERS (not present in charts.js)
    ===================================================== */
@@ -110,24 +154,7 @@ async function renderDashboard() {
     });
     container.appendChild(buildAddCard());
 
-    const historyRows = await getLastLoggedRows(PLOT_MAX_POINTS).catch(function () {
-        return [];
-    });
-
-    dashboardCharts.forEach(function (cfg) {
-        createChart("chart_" + cfg.id, historyRows, {
-            x: cfg.x,
-            y: cfg.y,
-            color: cfg.color,
-            compact: true,
-            title: null,
-            timeFormat: cfg.timeFormat || "seconds",
-            aggregate: true
-        });
-        if (cfg.x === "timestamp") {
-            setChartPrecision("chart_" + cfg.id, cfg.timeFormat || "seconds");
-        }
-    });
+    await refreshCharts();
 }
 
 /* =====================================================
@@ -379,11 +406,27 @@ function showRole(device1Active, count) {
     );
 }
 
-function handleTick(newRow, totalCount) {
-    dashboardCharts.forEach(function (cfg) {
-        appendPoint("chart_" + cfg.id, newRow, PLOT_MAX_POINTS);
-    });
-    showRole(!String(newRow.activeDevice || "").startsWith("Device 2"), totalCount);
+async function handleTick(newRow, totalCount) {
+    if (rebuilding) {
+        if (isMine(newRow)) pendingRows.push(newRow);
+        return;
+    }
+
+    if (isMine(newRow)) {
+        if (!isPlotting) {
+            // just took over: reload the shared history (Device 1's last points), then continue
+            isPlotting = true;
+            rebuilding = true;
+            try { await refreshCharts(); } finally { rebuilding = false; }
+            pendingRows.forEach(plotRow);
+            pendingRows = [];
+        }
+        plotRow(newRow);
+        showRole(false, totalCount);   // ACTIVE
+    } else {
+        isPlotting = false;            // chart stays frozen while Device 1 runs
+        showRole(true, totalCount);    // IDLE
+    }
 }
 
 async function initLiveControls() {

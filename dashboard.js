@@ -1,6 +1,6 @@
-/* Dashboard charts load backend history and update over SSE.
-   This page controls the shared feed; generation is independent of browser tabs.
-   Chart layout, precision controls, export, and drag/reorder behavior remain. */
+/* Device 1 (Master) dashboard.
+   Loads history from the backend (Neon) and updates live over SSE.
+   Also holds the "Interrupt Device 1" button, whose state follows the SERVER. */
 const PLOT_MAX_POINTS = 100;
 const STORAGE_KEY = "dashboard_charts_v3";
 
@@ -18,25 +18,108 @@ const COLOR_PALETTE = [
 
 let dashboardCharts = loadLayout();
 let dragSourceId = null;
+let d1_interrupted = false;
+
+/* Only the ACTIVE device's page plots live. When this page becomes active it
+   reloads the last points of the shared series, so it continues where the
+   other device left off. */
+const MY_DEVICE = "Device 1";
+function isMine(row) {
+    return String(row.activeDevice || "").startsWith(MY_DEVICE);
+}
+
+let isPlotting = false;
+let rebuilding = false;
+let pendingRows = [];
+let lastPlottedId = 0;
+
+async function refreshCharts() {
+    const rows = await getLastLoggedRows(PLOT_MAX_POINTS).catch(function () {
+        return [];
+    });
+
+    dashboardCharts.forEach(function (cfg) {
+        createChart("chart_" + cfg.id, rows, {
+            x: cfg.x,
+            y: cfg.y,
+            color: cfg.color,
+            compact: true,
+            title: null,
+            timeFormat: cfg.timeFormat || "seconds",
+            aggregate: true
+        });
+        if (cfg.x === "timestamp") {
+            setChartPrecision("chart_" + cfg.id, cfg.timeFormat || "seconds");
+        }
+    });
+
+    if (rows.length) lastPlottedId = rows[rows.length - 1].id;
+}
+
+function plotRow(row) {
+    if (row.id <= lastPlottedId) return;
+    lastPlottedId = row.id;
+    dashboardCharts.forEach(function (cfg) {
+        appendPoint("chart_" + cfg.id, row, PLOT_MAX_POINTS);
+    });
+}
 
 /* =====================================================
-   PERSISTENCE (localStorage) — layout only, not the data
+   HELPERS (not present in charts.js)
+   ===================================================== */
+
+function formatByPrecision(ts, precision) {
+    const d = new Date(ts);
+    if (isNaN(d.getTime())) return "";
+    const pad = (n, l) => String(n).padStart(l || 2, "0");
+    let h = d.getHours();
+    const ampm = h >= 12 ? "PM" : "AM";
+    h = h % 12 || 12;
+    const date = pad(d.getDate()) + "-" + pad(d.getMonth() + 1) + "-" + d.getFullYear();
+    const hh = pad(h);
+    const mm = pad(d.getMinutes());
+    const ss = pad(d.getSeconds());
+
+    if (precision === "hours") return date + " " + hh + " " + ampm;
+    if (precision === "minutes") return date + " " + hh + ":" + mm + " " + ampm;
+    if (precision === "milliseconds") return date + " " + hh + ":" + mm + ":" + ss + "." + pad(d.getMilliseconds(), 3) + " " + ampm;
+    return date + " " + hh + ":" + mm + ":" + ss + " " + ampm;
+}
+
+function setChartPrecision(canvasId, precision) {
+    const chart = chartRegistry[canvasId];
+    if (!chart) return;
+    chart.options.scales.x.ticks.callback = function (val) {
+        return formatByPrecision(val, precision);
+    };
+    chart.update("none");
+}
+
+function fillColumnSelect(selectId, opts) {
+    const select = document.getElementById(selectId);
+    if (!select) return;
+    const includeTimestamp = !opts || opts.includeTimestamp !== false;
+    select.innerHTML = "";
+    COLUMNS.forEach(function (col) {
+        if (col.key === "timestamp" && !includeTimestamp) return;
+        const option = document.createElement("option");
+        option.value = col.key;
+        option.textContent = col.label;
+        if (opts && opts.selected === col.key) option.selected = true;
+        select.appendChild(option);
+    });
+}
+
+/* =====================================================
+   PERSISTENCE (localStorage) - layout only, not the data
    ===================================================== */
 
 function loadLayout() {
     try {
         const raw = localStorage.getItem(STORAGE_KEY);
-
-        if (!raw) {
-            return DEFAULT_CHARTS.slice();
-        }
-
+        if (!raw) return DEFAULT_CHARTS.slice();
         const parsed = JSON.parse(raw);
-
-        if (Array.isArray(parsed) && parsed.length > 0) {
-            return parsed;
-        }
-
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
         return DEFAULT_CHARTS.slice();
     } catch (error) {
         console.error("Could not read saved dashboard layout", error);
@@ -62,18 +145,11 @@ function newChartId() {
 
 /* =====================================================
    RENDER THE GRID
-
-   Seeds every chart with whatever history is already in
-   the log (so it's never blank after navigating away and
-   back), then keeps growing live via handleTick().
    ===================================================== */
 
 async function renderDashboard() {
     const container = document.getElementById("chartGrid");
-
-    if (!container) {
-        return;
-    }
+    if (!container) return;
 
     container.innerHTML = "";
 
@@ -83,23 +159,7 @@ async function renderDashboard() {
 
     container.appendChild(buildAddCard());
 
-    const historyRows = await getLastLoggedRows(PLOT_MAX_POINTS).catch(
-        function () {
-            return [];
-        }
-    );
-
-    dashboardCharts.forEach(function (cfg) {
-        createChart("chart_" + cfg.id, historyRows, {
-            x: cfg.x,
-            y: cfg.y,
-            color: cfg.color,
-            compact: true,
-            title: null,
-            timeFormat: cfg.timeFormat || "seconds",
-            aggregate: true
-        });
-    });
+    await refreshCharts();
 }
 
 /* =====================================================
@@ -126,19 +186,16 @@ function buildCard(cfg) {
     handle.textContent = "\u22EE\u22EE";
 
     const title = document.createElement("h2");
-    title.textContent =
-        cfg.title || axisLabel(cfg.y) + " vs " + axisLabel(cfg.x);
+    title.textContent = cfg.title || axisLabel(cfg.y) + " vs " + axisLabel(cfg.x);
 
     const removeBtn = document.createElement("button");
     removeBtn.className = "card-remove";
     removeBtn.title = "Remove this graph";
     removeBtn.textContent = "\u00D7";
-
     removeBtn.addEventListener("click", function () {
         dashboardCharts = dashboardCharts.filter(function (c) {
             return c.id !== cfg.id;
         });
-
         saveLayout();
         renderDashboard();
     });
@@ -146,7 +203,7 @@ function buildCard(cfg) {
     toolbar.appendChild(handle);
     toolbar.appendChild(title);
 
-    /* PRECISION CONTROL — only meaningful for timestamp X-axis */
+    /* PRECISION CONTROL - only meaningful for timestamp X-axis */
     if (cfg.x === "timestamp") {
         const precisionRow = document.createElement("div");
         precisionRow.className = "card-precision-row";
@@ -155,20 +212,13 @@ function buildCard(cfg) {
         precisionSelect.className = "card-precision-select";
         precisionSelect.title = "Timestamp precision";
 
-        ["hours", "minutes", "seconds", "milliseconds"].forEach(
-            function (value) {
-                const option = document.createElement("option");
-                option.value = value;
-                option.textContent =
-                    value.charAt(0).toUpperCase() + value.slice(1);
-
-                if (value === (cfg.timeFormat || "seconds")) {
-                    option.selected = true;
-                }
-
-                precisionSelect.appendChild(option);
-            }
-        );
+        ["hours", "minutes", "seconds", "milliseconds"].forEach(function (value) {
+            const option = document.createElement("option");
+            option.value = value;
+            option.textContent = value.charAt(0).toUpperCase() + value.slice(1);
+            if (value === (cfg.timeFormat || "seconds")) option.selected = true;
+            precisionSelect.appendChild(option);
+        });
 
         precisionSelect.addEventListener("change", function () {
             cfg.timeFormat = precisionSelect.value;
@@ -202,7 +252,6 @@ function buildAddCard() {
     const button = document.createElement("button");
     button.className = "add-graph-btn";
     button.innerHTML = "+<span>Add Graph</span>";
-
     button.addEventListener("click", function () {
         openAddForm(card);
     });
@@ -242,11 +291,7 @@ function openAddForm(card) {
         const option = document.createElement("option");
         option.value = value;
         option.textContent = value.charAt(0).toUpperCase() + value.slice(1);
-
-        if (value === "seconds") {
-            option.selected = true;
-        }
-
+        if (value === "seconds") option.selected = true;
         precisionSelect.appendChild(option);
     });
 
@@ -274,7 +319,6 @@ function openAddForm(card) {
     confirmBtn.addEventListener("click", function () {
         const x = xSelect.value;
         const y = ySelect.value;
-        const timeFormat = precisionSelect.value;
 
         dashboardCharts.push({
             id: newChartId(),
@@ -282,7 +326,7 @@ function openAddForm(card) {
             x: x,
             y: y,
             color: nextColor(),
-            timeFormat: timeFormat
+            timeFormat: precisionSelect.value
         });
 
         saveLayout();
@@ -299,8 +343,7 @@ function openAddForm(card) {
     fillColumnSelect("newChartY", { includeTimestamp: false, selected: "P1" });
 
     function updatePrecisionVisibility() {
-        precisionWrap.style.display =
-            xSelect.value === "timestamp" ? "flex" : "none";
+        precisionWrap.style.display = xSelect.value === "timestamp" ? "flex" : "none";
     }
 
     xSelect.addEventListener("change", updatePrecisionVisibility);
@@ -328,22 +371,11 @@ function onDrop(event) {
     this.classList.remove("drag-over");
 
     const targetId = this.dataset.id;
+    if (!dragSourceId || dragSourceId === targetId) return;
 
-    if (!dragSourceId || dragSourceId === targetId) {
-        return;
-    }
-
-    const fromIndex = dashboardCharts.findIndex(function (c) {
-        return c.id === dragSourceId;
-    });
-
-    const toIndex = dashboardCharts.findIndex(function (c) {
-        return c.id === targetId;
-    });
-
-    if (fromIndex === -1 || toIndex === -1) {
-        return;
-    }
+    const fromIndex = dashboardCharts.findIndex(function (c) { return c.id === dragSourceId; });
+    const toIndex = dashboardCharts.findIndex(function (c) { return c.id === targetId; });
+    if (fromIndex === -1 || toIndex === -1) return;
 
     const moved = dashboardCharts.splice(fromIndex, 1)[0];
     dashboardCharts.splice(toIndex, 0, moved);
@@ -354,56 +386,113 @@ function onDrop(event) {
 
 function onDragEnd() {
     this.classList.remove("dragging");
-
     document.querySelectorAll(".drag-over").forEach(function (el) {
         el.classList.remove("drag-over");
     });
-
     dragSourceId = null;
 }
 
 /* =====================================================
-   LIVE FEED CONTROLS — always monitoring
+   DEVICE 1 INTERRUPT BUTTON - state comes from the server
+   ===================================================== */
+
+function renderInterruptButton() {
+    const btn = document.getElementById("btn-interrupt-d1");
+    if (!btn) return;
+    btn.style.background = d1_interrupted ? "#dc2626" : "#ea580c";
+    btn.innerText = d1_interrupted
+        ? "Resume Device 1 (Currently Interrupted)"
+        : "Interrupt Device 1 (Master)";
+}
+
+async function syncInterruptButton() {
+    try {
+        const s = await getFeedStatus();
+        d1_interrupted = !s.device1Active;
+        renderInterruptButton();
+    } catch (e) {
+        console.error("Could not sync interrupt button:", e);
+    }
+}
+
+async function toggleInterrupt(device) {
+    if (device !== "d1") return;
+    try {
+        const res = await fetch("/api/device1/interrupt", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ interrupt: !d1_interrupted })
+        });
+        const result = await res.json();
+        d1_interrupted = Boolean(result.interrupted); // trust the server, not a local guess
+        renderInterruptButton();
+    } catch (err) {
+        console.error("Failed to toggle interrupt:", err);
+    }
+}
+
+/* =====================================================
+   LIVE FEED
    ===================================================== */
 
 function setLiveStatus(text, isLive) {
     const status = document.getElementById("liveStatus") || document.getElementById("status");
-
     if (status) {
         status.textContent = text;
         status.classList.toggle("live-on", isLive === true);
     }
 }
 
-function handleTick(newRow, totalCount) {
-    dashboardCharts.forEach(function (cfg) {
-        appendPoint("chart_" + cfg.id, newRow, PLOT_MAX_POINTS);
-    });
+async function handleTick(newRow, totalCount) {
+    if (rebuilding) {
+        if (isMine(newRow)) pendingRows.push(newRow);
+        return;
+    }
 
-    setLiveStatus("Live \u2014 " + totalCount + " readings logged", true);
+    if (isMine(newRow)) {
+        if (!isPlotting) {
+            // just became active: reload the shared history, then continue from it
+            isPlotting = true;
+            rebuilding = true;
+            try { await refreshCharts(); } finally { rebuilding = false; }
+            pendingRows.forEach(plotRow);
+            pendingRows = [];
+        }
+        plotRow(newRow);
+        setLiveStatus("Live \u2014 Device 1 producing data (" + totalCount + " readings)", true);
+    } else {
+        isPlotting = false;   // chart stays frozen while Device 2 is active
+        setLiveStatus("Device 1 interrupted \u2014 Device 2 is producing data (" + totalCount + " readings)", false);
+    }
 }
 
 async function initLiveControls() {
     const downloadBtn = document.getElementById("downloadLog");
 
-    // Auto-start the feed so it is always monitoring
+    await syncInterruptButton();
+
     try {
-        let status = await getFeedStatus();
-        if (!status.running) {
-            status = await startRealtimeFeed();
-        }
+        const status = await getFeedStatus();
         setLiveStatus("Live \u2014 " + status.count + " readings logged", true);
     } catch (error) {
-        console.error("Could not check/start backend feed:", error);
+        console.error("Could not read backend status:", error);
         setLiveStatus("Backend unavailable: " + error.message, false);
     }
+
+    // keep the button correct even if another tab/device changes the state
+    setInterval(syncInterruptButton, 3000);
 
     if (downloadBtn) {
         downloadBtn.addEventListener("click", async function () {
             downloadBtn.disabled = true;
-            try { await exportLogToExcel(); }
-            catch (error) { console.error("Excel export failed:", error); setLiveStatus("Export failed: " + error.message, false); }
-            finally { downloadBtn.disabled = false; }
+            try {
+                await exportLogToExcel();
+            } catch (error) {
+                console.error("Excel export failed:", error);
+                setLiveStatus("Export failed: " + error.message, false);
+            } finally {
+                downloadBtn.disabled = false;
+            }
         });
     }
 }
@@ -419,32 +508,3 @@ renderDashboard().then(function () {
     console.error("Dashboard failed to load:", error);
     setLiveStatus("Dashboard load failed: " + error.message, false);
 });
-/* =====================================================
-   DEVICE 1 INTERRUPT TOGGLE LOGIC
-   ===================================================== */
-let d1_interrupted = false;
-
-async function toggleInterrupt(device) {
-    if (device !== 'd1') return;
-    
-    d1_interrupted = !d1_interrupted;
-    const btn = document.getElementById('btn-interrupt-d1');
-    
-    if (d1_interrupted) {
-        btn.style.background = "#dc2626";
-        btn.innerText = "Resume Device 1 (Currently Interrupted)";
-    } else {
-        btn.style.background = "#ea580c";
-        btn.innerText = "Interrupt Device 1 (Master)";
-    }
-
-    try {
-        await fetch('/api/device1/interrupt', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ interrupt: d1_interrupted })
-        });
-    } catch (err) {
-        console.error(`Failed to toggle interrupt:`, err);
-    }
-}
