@@ -47,7 +47,7 @@ class FeedGenerator {
             this.storage.getLatestReading()
         ]);
         return {
-            running: state.running,
+            running: this.running && state.running,
             count,
             latestId: latest ? latest.id : 0,
             latestTimestamp: latest ? latest.timestamp : null
@@ -57,6 +57,7 @@ class FeedGenerator {
     async start() {
         if (this.running) return this.status();
         this.running = true;
+        if (this.timer) clearTimeout(this.timer);
         await this.storage.setFeedState(true, this.values);
         this.lastTickAt = Date.now();
         this.schedule(this.tickMs);
@@ -65,18 +66,23 @@ class FeedGenerator {
 
     async stop() {
         this.running = false;
-        if (this.timer) clearTimeout(this.timer);
-        this.timer = null;
+        if (this.timer) {
+            clearTimeout(this.timer);
+            this.timer = null;
+        }
         await this.storage.setFeedState(false, this.values);
         return this.status();
     }
 
     schedule(delay) {
-        if (this.running) this.timer = setTimeout(() => this.tick(), delay);
+        if (!this.running) return;
+        if (this.timer) clearTimeout(this.timer);
+        this.timer = setTimeout(() => this.tick(), delay);
     }
 
     async tick() {
         if (!this.running) return;
+        
         const now = Date.now();
         const row = { timestamp: new Date(now).toISOString() };
 
@@ -85,9 +91,15 @@ class FeedGenerator {
             row[key] = this.values[key];
         }
 
+        // Double check running state before saving
+        if (!this.running) return;
+
         try {
             const saved = await this.storage.saveReading(row);
-            await this.storage.setFeedState(this.running, this.values);
+            // Triple check running state after async DB save before publishing or rescheduling
+            if (!this.running) return;
+
+            await this.storage.setFeedState(false, this.values); // keep state synced
             this.stream.publish(saved);
         } catch (error) {
             console.error("Sensor reading could not be persisted", error);
