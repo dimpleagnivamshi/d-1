@@ -91,15 +91,13 @@ class FeedGenerator {
             row[key] = this.values[key];
         }
 
-        // Double check running state before saving
         if (!this.running) return;
 
         try {
             const saved = await this.storage.saveReading(row);
-            // Triple check running state after async DB save before publishing or rescheduling
             if (!this.running) return;
 
-            await this.storage.setFeedState(false, this.values); // keep state synced
+            await this.storage.setFeedState(false, this.values); 
             this.stream.publish(saved);
         } catch (error) {
             console.error("Sensor reading could not be persisted", error);
@@ -107,7 +105,9 @@ class FeedGenerator {
 
         this.lastTickAt = now;
         if (this.running) {
-            this.schedule(Math.max(0, this.lastTickAt + this.tickMs - Date.now()));
+            const elapsed = Date.now() - now;
+            const nextDelay = Math.max(0, this.tickMs - elapsed);
+            this.schedule(nextDelay);
         }
     }
 }
