@@ -35,6 +35,28 @@ function createRoutes(storage, generator, stream, config) {
         if (req.method === "POST" && pathname === "/api/feed/stop") {
             return json(res, 200, await generator.stop());
         }
+
+        // ==========================================
+        // DEVICE 1 INTERRUPT ROUTE HANDLER
+        // ==========================================
+        if (req.method === "POST" && pathname === "/api/device1/interrupt") {
+            let body = "";
+            for await (const chunk of req) {
+                body += chunk;
+            }
+            try {
+                const parsed = JSON.parse(body);
+                if (parsed.interrupt) {
+                    return json(res, 200, await generator.stop());
+                } else {
+                    return json(res, 200, await generator.start());
+                }
+            } catch (err) {
+                return json(res, 400, { error: "Invalid JSON provided" });
+            }
+        }
+        // ==========================================
+
         return false;
     }
     return { handle };
