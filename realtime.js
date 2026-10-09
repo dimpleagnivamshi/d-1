@@ -4,6 +4,8 @@ let lastKnownReadingId = 0;
 let knownReadingCount = 0;
 let eventSource = null;
 let streamConnecting = false;
+let pollTimer = null;
+let pollBusy = false;
 const tickListeners = [];
 
 async function apiRequest(path, options) {
@@ -41,8 +43,33 @@ async function stopRealtimeFeed() {
     return apiRequest("/api/status");
 }
 
+/* Delivers a row to every listener, once per id (shared by SSE and polling) */
+function deliverRow(row) {
+    if (!row || row.id <= lastKnownReadingId) return;
+    lastKnownReadingId = row.id;
+    knownReadingCount = row.id;
+    tickListeners.forEach(fn => fn(row, knownReadingCount));
+}
+
+/* Polling fallback: works even when the host buffers the SSE stream */
+function startPollingFallback() {
+    if (pollTimer) return;
+    pollTimer = setInterval(async function () {
+        if (pollBusy) return;              // never overlap requests
+        pollBusy = true;
+        try {
+            const result = await apiRequest("/api/readings?limit=30");
+            result.rows.forEach(deliverRow);   // oldest -> newest, skips already-seen ids
+        } catch (error) {
+        } finally {
+            pollBusy = false;
+        }
+    }, 1000);
+}
+
 function onRealtimeTick(callback) {
     tickListeners.push(callback);
+    startPollingFallback();
     if (eventSource || streamConnecting) return;
     streamConnecting = true;
 
@@ -51,11 +78,7 @@ function onRealtimeTick(callback) {
 
     source.addEventListener("reading", function (event) {
         try {
-            const row = JSON.parse(event.data);
-            if (row.id <= lastKnownReadingId) return;
-            lastKnownReadingId = row.id;
-            knownReadingCount += 1;
-            tickListeners.forEach(fn => fn(row, knownReadingCount));
+            deliverRow(JSON.parse(event.data));
         } catch (error) {}
     });
 

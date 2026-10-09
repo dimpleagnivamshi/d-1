@@ -29,12 +29,14 @@ class DeviceWorker {
         this.timer = null;
         this.running = false;
         this.wasActive = false;
+        this.nextAt = 0;
         this.values = initialValues();
     }
 
     start(delay = 0) {
         if (this.running) return;
         this.running = true;
+        this.nextAt = Date.now() + delay;
         this.schedule(delay);
     }
 
@@ -45,13 +47,13 @@ class DeviceWorker {
 
     schedule(delay) {
         if (!this.running) return;
-        this.timer = setTimeout(() => this.tick(), delay);
+        this.timer = setTimeout(() => this.tick(), Math.max(0, delay));
     }
 
     async shouldBeActive() { return false; }   // overridden
 
     async tick() {
-        const started = Date.now();
+        const scheduledAt = this.nextAt;
         try {
             const active = await this.shouldBeActive();
             if (active) {
@@ -62,8 +64,9 @@ class DeviceWorker {
         } catch (err) {
             console.error(`[${this.name}] tick failed:`, err.message);
         }
-        // next tick starts only after this one finishes (no overlap), keeps 1s cadence
-        this.schedule(Math.max(0, this.tickMs - (Date.now() - started)));
+        // fixed 1s cadence; if we fell behind, don't burst to catch up
+        this.nextAt = Math.max(scheduledAt + this.tickMs, Date.now());
+        this.schedule(this.nextAt - Date.now());
     }
 
     async loadContinuity() {
@@ -95,21 +98,35 @@ class Device1Worker extends DeviceWorker {
     constructor(stream) {
         super({ name: "Device 1 (Master Active)", stream });
         this.interrupted = false;
+        this.stateChain = Promise.resolve();   // keeps feed_state writes in order
     }
 
     async shouldBeActive() { return !this.interrupted; }
 
+    queueState(fn) {
+        const run = this.stateChain.then(fn);
+        this.stateChain = run.catch(e => console.error("feed_state write failed:", e.message));
+        return run;
+    }
+
     async produce() {
         const saved = await super.produce();
-        await storage.setFeedState(true, this.values);   // heartbeat
+        // heartbeat: not awaited, so it never delays the next reading.
+        // The interrupted check runs when the write actually executes, so a late
+        // heartbeat can never overwrite the "interrupted" state.
+        const snapshot = { ...this.values };
+        this.queueState(async () => {
+            if (!this.interrupted) await storage.setFeedState(true, snapshot);
+        }).catch(() => {});
         return saved;
     }
 
     async setInterrupted(flag) {
         this.interrupted = flag;
         if (flag) this.wasActive = false;                // reload values on resume
-        // write immediately so D2 reacts on its next tick (and D2 stops quickly when D1 resumes)
-        await storage.setFeedState(!flag, this.values);
+        const snapshot = { ...this.values };
+        // written in order, right away, so D2 reacts on its next tick
+        await this.queueState(() => storage.setFeedState(!flag, snapshot));
     }
 }
 
@@ -147,11 +164,12 @@ class FailoverEngine {
 
     async getStatus() {
         const device1Active = !this.d1.interrupted;
+        const latest = await storage.getLatestReading();
         return {
             device1Active,
             activeWorker: device1Active ? "Device 1 (Master Active)" : "Device 2 (Failover Active)",
-            count: await storage.getReadingCount(),
-            latest: await storage.getLatestReading()
+            count: latest ? latest.id : 0,
+            latest
         };
     }
 }
