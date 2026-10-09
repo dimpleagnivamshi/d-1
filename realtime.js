@@ -33,6 +33,14 @@ async function getAllLoggedRows() {
     return result.rows;
 }
 
+async function startRealtimeFeed() {
+    return apiRequest("/api/status");
+}
+
+async function stopRealtimeFeed() {
+    return apiRequest("/api/status");
+}
+
 function onRealtimeTick(callback) {
     tickListeners.push(callback);
     if (eventSource || streamConnecting) return;
