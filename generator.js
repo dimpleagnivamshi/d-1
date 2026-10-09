@@ -94,11 +94,16 @@ class FeedGenerator {
         if (!this.running) return;
 
         try {
+            // Save reading and publish immediately via SSE without waiting for state sync
             const saved = await this.storage.saveReading(row);
             if (!this.running) return;
 
-            await this.storage.setFeedState(false, this.values); 
             this.stream.publish(saved);
+
+            // Non-blocking background state sync
+            this.storage.setFeedState(true, this.values).catch(err => {
+                console.error("Background feed state sync failed:", err.message);
+            });
         } catch (error) {
             console.error("Sensor reading could not be persisted", error);
         }
@@ -113,3 +118,4 @@ class FeedGenerator {
 }
 
 module.exports = { FeedGenerator, initialValues };
+
