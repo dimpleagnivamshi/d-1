@@ -89,8 +89,6 @@ function appendPoint(canvasId, row, maxPoints) {
     const chart = chartRegistry[canvasId];
     if (!chart) return;
     const x = new Date(row.timestamp).getTime();
-    const y = Number(row[chart.data.datasets[0].label === "P1" ? "P1" : chart.data.datasets[0].label]); // simplified fallback
-    // using direct lookup based on dataset label matching column key
     const yKey = COLUMNS.find(c => c.label === chart.data.datasets[0].label)?.key || "P1";
     const val = Number(row[yKey]);
     if (!Number.isFinite(x) || !Number.isFinite(val)) return;
@@ -98,5 +96,7 @@ function appendPoint(canvasId, row, maxPoints) {
     const data = chart.data.datasets[0].data;
     data.push({ x, y: val });
     if (maxPoints && data.length > maxPoints) data.shift();
+    
+    // 'none' disables transition animations so the point plots instantly
     chart.update("none");
 }

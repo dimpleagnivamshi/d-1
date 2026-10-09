@@ -22,25 +22,33 @@ class UnifiedEngine {
         this.stream = stream;
         this.tickMs = tickMs;
         this.timer = null;
+        this.running = false;
         
         this.device1Active = true;
         this.values = initialValues();
         this.readingsLog = [];
-        this.lastTickAt = Date.now();
-        
-        this.pushReading();
+        this.lastTickAt = 0;
     }
 
     start() {
-        if (this.timer) clearInterval(this.timer);
-        this.timer = setInterval(() => this.tick(), this.tickMs);
+        if (this.running) return;
+        this.running = true;
+        this.lastTickAt = Date.now();
+        this.schedule(this.tickMs);
     }
 
     stop() {
+        this.running = false;
         if (this.timer) {
-            clearInterval(this.timer);
+            clearTimeout(this.timer);
             this.timer = null;
         }
+    }
+
+    schedule(delay) {
+        if (!this.running) return;
+        if (this.timer) clearTimeout(this.timer);
+        this.timer = setTimeout(() => this.tick(), delay);
     }
 
     pushReading() {
@@ -60,8 +68,17 @@ class UnifiedEngine {
     }
 
     tick() {
-        const currentRow = this.pushReading();
-        return currentRow;
+        if (!this.running) return;
+        const now = Date.now();
+        
+        this.pushReading();
+
+        this.lastTickAt = now;
+        if (this.running) {
+            const elapsed = Date.now() - now;
+            const nextDelay = Math.max(0, this.tickMs - elapsed);
+            this.schedule(nextDelay);
+        }
     }
 
     setDevice1State(active) {
