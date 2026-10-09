@@ -1,3 +1,5 @@
+const storage = require("./storage");
+
 const DEFAULTS = {
     P1: { start: 2.348, min: 1.138, max: 3.034, volatility: 0.04 },
     P2: { start: 1.023, min: 0.948, max: 1.138, volatility: 0.004 },
@@ -7,99 +9,151 @@ const DEFAULTS = {
     TCS_dP_P1_P2: { start: 1.363, min: 0, max: 2.0, volatility: 0.04 }
 };
 
+const HEARTBEAT_STALE_MS = 3500;
+
 function initialValues() {
-    return Object.fromEntries(Object.entries(DEFAULTS).map(([key, cfg]) => [key, cfg.start]));
+    return Object.fromEntries(Object.entries(DEFAULTS).map(([k, c]) => [k, c.start]));
 }
 
 function nextValue(previous, cfg) {
-    const randomStep = (Math.random() - 0.5) * 2 * cfg.volatility;
-    const pullToStart = (cfg.start - previous) * 0.02;
-    return Math.max(cfg.min, Math.min(cfg.max, previous + randomStep + pullToStart));
+    const step = (Math.random() - 0.5) * 2 * cfg.volatility;
+    const pull = (cfg.start - previous) * 0.02;
+    return Math.max(cfg.min, Math.min(cfg.max, previous + step + pull));
 }
 
-class UnifiedEngine {
-    constructor(stream, tickMs = 1000) {
+class DeviceWorker {
+    constructor({ name, stream, tickMs = 1000 }) {
+        this.name = name;
         this.stream = stream;
         this.tickMs = tickMs;
         this.timer = null;
         this.running = false;
-        
-        this.device1Active = true;
+        this.wasActive = false;
         this.values = initialValues();
-        this.readingsLog = [];
-        this.lastTickAt = 0;
-        
-        this.pushReading();
     }
 
-    start() {
+    start(delay = 0) {
         if (this.running) return;
         this.running = true;
-        this.lastTickAt = Date.now();
-        this.schedule(this.tickMs);
+        this.schedule(delay);
     }
 
     stop() {
         this.running = false;
-        if (this.timer) {
-            clearTimeout(this.timer);
-            this.timer = null;
-        }
+        clearTimeout(this.timer);
     }
 
     schedule(delay) {
         if (!this.running) return;
-        if (this.timer) clearTimeout(this.timer);
         this.timer = setTimeout(() => this.tick(), delay);
     }
 
-    pushReading() {
+    async shouldBeActive() { return false; }   // overridden
+
+    async tick() {
+        const started = Date.now();
+        try {
+            const active = await this.shouldBeActive();
+            if (active) {
+                if (!this.wasActive) await this.loadContinuity(); // take over from last value
+                await this.produce();
+            }
+            this.wasActive = active;
+        } catch (err) {
+            console.error(`[${this.name}] tick failed:`, err.message);
+        }
+        // next tick starts only after this one finishes (no overlap), keeps 1s cadence
+        this.schedule(Math.max(0, this.tickMs - (Date.now() - started)));
+    }
+
+    async loadContinuity() {
+        const latest = await storage.getLatestReading();
+        this.values = initialValues();
+        if (latest) {
+            for (const key of Object.keys(DEFAULTS)) {
+                if (Number.isFinite(Number(latest[key]))) this.values[key] = Number(latest[key]);
+            }
+        }
+    }
+
+    async produce() {
         for (const [key, cfg] of Object.entries(DEFAULTS)) {
             this.values[key] = nextValue(this.values[key], cfg);
         }
-        const row = {
-            id: this.readingsLog.length + 1,
+        const saved = await storage.saveReading({
             timestamp: new Date().toISOString(),
-            activeDevice: this.device1Active ? "Device 1 (Master Active)" : "Device 2 (Failover Active)",
+            activeDevice: this.name,
             ...this.values
-        };
-        this.readingsLog.push(row);
-        if (this.readingsLog.length > 5000) this.readingsLog.shift();
-        this.stream.publish(row);
-        return row;
-    }
-
-    tick() {
-        if (!this.running) return;
-        const now = Date.now();
-        
-        this.pushReading();
-
-        this.lastTickAt = now;
-        if (this.running) {
-            const elapsed = Date.now() - now;
-            const nextDelay = Math.max(0, this.tickMs - elapsed);
-            this.schedule(nextDelay);
-        }
-    }
-
-    setDevice1State(active) {
-        this.device1Active = Boolean(active);
-        return { device1Active: this.device1Active, activeWorker: this.device1Active ? "Device 1" : "Device 2" };
-    }
-
-    getStatus() {
-        return {
-            device1Active: this.device1Active,
-            activeWorker: this.device1Active ? "Device 1 (Master Active)" : "Device 2 (Failover Active)",
-            count: this.readingsLog.length,
-            latest: this.readingsLog[this.readingsLog.length - 1] || null
-        };
-    }
-
-    getReadings(limit = 100) {
-        return this.readingsLog.slice(-limit);
+        });
+        this.stream.publish(saved);
+        return saved;
     }
 }
 
-module.exports = { UnifiedEngine };
+/* ---------- Device 1 (Master) ---------- */
+class Device1Worker extends DeviceWorker {
+    constructor(stream) {
+        super({ name: "Device 1 (Master Active)", stream });
+        this.interrupted = false;
+    }
+
+    async shouldBeActive() { return !this.interrupted; }
+
+    async produce() {
+        const saved = await super.produce();
+        await storage.setFeedState(true, this.values);   // heartbeat
+        return saved;
+    }
+
+    async setInterrupted(flag) {
+        this.interrupted = flag;
+        if (flag) this.wasActive = false;                // reload values on resume
+        // write immediately so D2 reacts on its next tick (and D2 stops quickly when D1 resumes)
+        await storage.setFeedState(!flag, this.values);
+    }
+}
+
+/* ---------- Device 2 (Failover) ---------- */
+class Device2Worker extends DeviceWorker {
+    constructor(stream) {
+        super({ name: "Device 2 (Failover Active)", stream });
+    }
+
+    async shouldBeActive() {
+        const d1 = await storage.getFeedState();
+        const d1Healthy = d1.running && d1.age_ms < HEARTBEAT_STALE_MS;
+        return !d1Healthy;       // idle while D1 is healthy
+    }
+}
+
+/* ---------- Facade used by server.js ---------- */
+class FailoverEngine {
+    constructor(stream) {
+        this.d1 = new Device1Worker(stream);
+        this.d2 = new Device2Worker(stream);
+    }
+
+    start() {
+        this.d1.start(0);
+        this.d2.start(700);   // offset so D1's first heartbeat lands before D2 checks
+    }
+
+    stop() { this.d1.stop(); this.d2.stop(); }
+
+    async setDevice1State(active) {
+        await this.d1.setInterrupted(!active);
+        return this.getStatus();
+    }
+
+    async getStatus() {
+        const device1Active = !this.d1.interrupted;
+        return {
+            device1Active,
+            activeWorker: device1Active ? "Device 1 (Master Active)" : "Device 2 (Failover Active)",
+            count: await storage.getReadingCount(),
+            latest: await storage.getLatestReading()
+        };
+    }
+}
+
+module.exports = { FailoverEngine };

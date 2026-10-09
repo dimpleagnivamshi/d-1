@@ -32,12 +32,14 @@ async function initializeStorage() {
 }
 
 async function getFeedState() {
-    // Changed key from 'd2_state' to 'd1_state' so d-2 can monitor d-1 correctly
-    const res = await pool.query("SELECT running, last_values FROM feed_state WHERE key = 'd1_state'");
-    if (res.rows.length === 0) return { running: false, last_values: {} };
-    return res.rows[0];
+    const res = await pool.query(`
+        SELECT running, last_values,
+               EXTRACT(EPOCH FROM (NOW() - updated_at)) * 1000 AS age_ms
+        FROM feed_state WHERE key = 'd1_state'`);
+    if (res.rows.length === 0) return { running: false, last_values: {}, age_ms: Infinity };
+    const r = res.rows[0];
+    return { running: r.running, last_values: r.last_values, age_ms: Number(r.age_ms) };
 }
-
 async function setFeedState(running, values) {
     // Changed key from 'd2_state' to 'd1_state'
     await pool.query(`

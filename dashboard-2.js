@@ -1,3 +1,6 @@
+/* Device 2 (Failover) dashboard.
+   Shows IDLE while Device 1 is healthy, ACTIVE when Device 2 has taken over.
+   Charts load history from the backend (Neon) and update live over SSE. */
 const PLOT_MAX_POINTS = 100;
 const STORAGE_KEY = "dashboard_2_charts_v3";
 
@@ -8,10 +11,63 @@ const DEFAULT_CHARTS = [
     { id: "c4", title: "RPM vs Time", x: "timestamp", y: "RPM", color: "#9333ea", timeFormat: "seconds" }
 ];
 
-const COLOR_PALETTE = ["#16a34a", "#2563eb", "#dc2626", "#9333ea", "#ea580c", "#0891b2", "#db2777", "#65a30d"];
+const COLOR_PALETTE = [
+    "#16a34a", "#2563eb", "#dc2626", "#9333ea",
+    "#ea580c", "#0891b2", "#db2777", "#65a30d"
+];
 
 let dashboardCharts = loadLayout();
 let dragSourceId = null;
+
+/* =====================================================
+   HELPERS (not present in charts.js)
+   ===================================================== */
+
+function formatByPrecision(ts, precision) {
+    const d = new Date(ts);
+    if (isNaN(d.getTime())) return "";
+    const pad = (n, l) => String(n).padStart(l || 2, "0");
+    let h = d.getHours();
+    const ampm = h >= 12 ? "PM" : "AM";
+    h = h % 12 || 12;
+    const date = pad(d.getDate()) + "-" + pad(d.getMonth() + 1) + "-" + d.getFullYear();
+    const hh = pad(h);
+    const mm = pad(d.getMinutes());
+    const ss = pad(d.getSeconds());
+
+    if (precision === "hours") return date + " " + hh + " " + ampm;
+    if (precision === "minutes") return date + " " + hh + ":" + mm + " " + ampm;
+    if (precision === "milliseconds") return date + " " + hh + ":" + mm + ":" + ss + "." + pad(d.getMilliseconds(), 3) + " " + ampm;
+    return date + " " + hh + ":" + mm + ":" + ss + " " + ampm;
+}
+
+function setChartPrecision(canvasId, precision) {
+    const chart = chartRegistry[canvasId];
+    if (!chart) return;
+    chart.options.scales.x.ticks.callback = function (val) {
+        return formatByPrecision(val, precision);
+    };
+    chart.update("none");
+}
+
+function fillColumnSelect(selectId, opts) {
+    const select = document.getElementById(selectId);
+    if (!select) return;
+    const includeTimestamp = !opts || opts.includeTimestamp !== false;
+    select.innerHTML = "";
+    COLUMNS.forEach(function (col) {
+        if (col.key === "timestamp" && !includeTimestamp) return;
+        const option = document.createElement("option");
+        option.value = col.key;
+        option.textContent = col.label;
+        if (opts && opts.selected === col.key) option.selected = true;
+        select.appendChild(option);
+    });
+}
+
+/* =====================================================
+   PERSISTENCE (localStorage) - layout only
+   ===================================================== */
 
 function loadLayout() {
     try {
@@ -27,7 +83,9 @@ function loadLayout() {
 function saveLayout() {
     try {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(dashboardCharts));
-    } catch (error) {}
+    } catch (error) {
+        console.error("Could not save dashboard layout", error);
+    }
 }
 
 function nextColor() {
@@ -38,16 +96,25 @@ function newChartId() {
     return "c" + Date.now() + Math.floor(Math.random() * 1000);
 }
 
+/* =====================================================
+   RENDER THE GRID
+   ===================================================== */
+
 async function renderDashboard() {
     const container = document.getElementById("chartGrid");
     if (!container) return;
     container.innerHTML = "";
 
-    dashboardCharts.forEach(cfg => container.appendChild(buildCard(cfg)));
+    dashboardCharts.forEach(function (cfg) {
+        container.appendChild(buildCard(cfg));
+    });
     container.appendChild(buildAddCard());
 
-    const historyRows = await getLastLoggedRows(PLOT_MAX_POINTS).catch(() => []);
-    dashboardCharts.forEach(cfg => {
+    const historyRows = await getLastLoggedRows(PLOT_MAX_POINTS).catch(function () {
+        return [];
+    });
+
+    dashboardCharts.forEach(function (cfg) {
         createChart("chart_" + cfg.id, historyRows, {
             x: cfg.x,
             y: cfg.y,
@@ -57,8 +124,15 @@ async function renderDashboard() {
             timeFormat: cfg.timeFormat || "seconds",
             aggregate: true
         });
+        if (cfg.x === "timestamp") {
+            setChartPrecision("chart_" + cfg.id, cfg.timeFormat || "seconds");
+        }
     });
 }
+
+/* =====================================================
+   ONE CHART CARD
+   ===================================================== */
 
 function buildCard(cfg) {
     const card = document.createElement("div");
@@ -76,6 +150,7 @@ function buildCard(cfg) {
 
     const handle = document.createElement("span");
     handle.className = "drag-handle";
+    handle.title = "Drag to reorder";
     handle.textContent = "\u22EE\u22EE";
 
     const title = document.createElement("h2");
@@ -83,49 +158,209 @@ function buildCard(cfg) {
 
     const removeBtn = document.createElement("button");
     removeBtn.className = "card-remove";
+    removeBtn.title = "Remove this graph";
     removeBtn.textContent = "\u00D7";
-    removeBtn.addEventListener("click", () => {
-        dashboardCharts = dashboardCharts.filter(c => c.id !== cfg.id);
+    removeBtn.addEventListener("click", function () {
+        dashboardCharts = dashboardCharts.filter(function (c) {
+            return c.id !== cfg.id;
+        });
         saveLayout();
         renderDashboard();
     });
 
     toolbar.appendChild(handle);
     toolbar.appendChild(title);
+
+    if (cfg.x === "timestamp") {
+        const precisionRow = document.createElement("div");
+        precisionRow.className = "card-precision-row";
+
+        const precisionSelect = document.createElement("select");
+        precisionSelect.className = "card-precision-select";
+        precisionSelect.title = "Timestamp precision";
+
+        ["hours", "minutes", "seconds", "milliseconds"].forEach(function (value) {
+            const option = document.createElement("option");
+            option.value = value;
+            option.textContent = value.charAt(0).toUpperCase() + value.slice(1);
+            if (value === (cfg.timeFormat || "seconds")) option.selected = true;
+            precisionSelect.appendChild(option);
+        });
+
+        precisionSelect.addEventListener("change", function () {
+            cfg.timeFormat = precisionSelect.value;
+            setChartPrecision("chart_" + cfg.id, precisionSelect.value);
+            saveLayout();
+        });
+
+        precisionRow.appendChild(precisionSelect);
+        toolbar.appendChild(precisionRow);
+    }
+
     toolbar.appendChild(removeBtn);
 
     const canvas = document.createElement("canvas");
     canvas.id = "chart_" + cfg.id;
+
     card.appendChild(toolbar);
     card.appendChild(canvas);
     return card;
 }
 
+/* =====================================================
+   "+ ADD GRAPH" CARD
+   ===================================================== */
+
 function buildAddCard() {
     const card = document.createElement("div");
     card.className = "chart-card add-card";
+
     const button = document.createElement("button");
     button.className = "add-graph-btn";
     button.innerHTML = "+<span>Add Graph</span>";
-    button.addEventListener("click", () => renderDashboard());
+    button.addEventListener("click", function () {
+        openAddForm(card);
+    });
+
     card.appendChild(button);
     return card;
 }
 
-function onDragStart(event) { dragSourceId = this.dataset.id; this.classList.add("dragging"); }
-function onDragOver(event) { event.preventDefault(); }
+function openAddForm(card) {
+    card.innerHTML = "";
+    card.classList.add("add-card-open");
+
+    const form = document.createElement("div");
+    form.className = "add-form";
+
+    const xLabel = document.createElement("label");
+    xLabel.textContent = "X-Axis";
+    const xSelect = document.createElement("select");
+    xSelect.id = "newChartX";
+
+    const yLabel = document.createElement("label");
+    yLabel.textContent = "Y-Axis";
+    const ySelect = document.createElement("select");
+    ySelect.id = "newChartY";
+
+    const precisionWrap = document.createElement("div");
+    precisionWrap.id = "newChartPrecisionWrap";
+    precisionWrap.className = "precision-wrap";
+
+    const precisionLabel = document.createElement("label");
+    precisionLabel.textContent = "Timestamp Precision";
+
+    const precisionSelect = document.createElement("select");
+    precisionSelect.id = "newChartPrecision";
+
+    ["hours", "minutes", "seconds", "milliseconds"].forEach(function (value) {
+        const option = document.createElement("option");
+        option.value = value;
+        option.textContent = value.charAt(0).toUpperCase() + value.slice(1);
+        if (value === "seconds") option.selected = true;
+        precisionSelect.appendChild(option);
+    });
+
+    precisionWrap.appendChild(precisionLabel);
+    precisionWrap.appendChild(precisionSelect);
+
+    form.appendChild(xLabel);
+    form.appendChild(xSelect);
+    form.appendChild(yLabel);
+    form.appendChild(ySelect);
+    form.appendChild(precisionWrap);
+
+    const actions = document.createElement("div");
+    actions.className = "add-form-actions";
+
+    const confirmBtn = document.createElement("button");
+    confirmBtn.className = "btn-confirm";
+    confirmBtn.textContent = "Add";
+
+    const cancelBtn = document.createElement("button");
+    cancelBtn.className = "btn-cancel";
+    cancelBtn.textContent = "Cancel";
+    cancelBtn.addEventListener("click", renderDashboard);
+
+    confirmBtn.addEventListener("click", function () {
+        const x = xSelect.value;
+        const y = ySelect.value;
+
+        dashboardCharts.push({
+            id: newChartId(),
+            title: axisLabel(y) + " vs " + axisLabel(x),
+            x: x,
+            y: y,
+            color: nextColor(),
+            timeFormat: precisionSelect.value
+        });
+
+        saveLayout();
+        renderDashboard();
+    });
+
+    actions.appendChild(confirmBtn);
+    actions.appendChild(cancelBtn);
+    form.appendChild(actions);
+
+    card.appendChild(form);
+
+    fillColumnSelect("newChartX", { selected: "timestamp" });
+    fillColumnSelect("newChartY", { includeTimestamp: false, selected: "P1" });
+
+    function updatePrecisionVisibility() {
+        precisionWrap.style.display = xSelect.value === "timestamp" ? "flex" : "none";
+    }
+
+    xSelect.addEventListener("change", updatePrecisionVisibility);
+    updatePrecisionVisibility();
+}
+
+/* =====================================================
+   DRAG & DROP REORDERING
+   ===================================================== */
+
+function onDragStart(event) {
+    dragSourceId = this.dataset.id;
+    this.classList.add("dragging");
+    event.dataTransfer.effectAllowed = "move";
+}
+
+function onDragOver(event) {
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    this.classList.add("drag-over");
+}
+
 function onDrop(event) {
     event.preventDefault();
+    this.classList.remove("drag-over");
+
     const targetId = this.dataset.id;
     if (!dragSourceId || dragSourceId === targetId) return;
-    const fromIndex = dashboardCharts.findIndex(c => c.id === dragSourceId);
-    const toIndex = dashboardCharts.findIndex(c => c.id === targetId);
+
+    const fromIndex = dashboardCharts.findIndex(function (c) { return c.id === dragSourceId; });
+    const toIndex = dashboardCharts.findIndex(function (c) { return c.id === targetId; });
+    if (fromIndex === -1 || toIndex === -1) return;
+
     const moved = dashboardCharts.splice(fromIndex, 1)[0];
     dashboardCharts.splice(toIndex, 0, moved);
+
     saveLayout();
     renderDashboard();
 }
-function onDragEnd() { this.classList.remove("dragging"); dragSourceId = null; }
+
+function onDragEnd() {
+    this.classList.remove("dragging");
+    document.querySelectorAll(".drag-over").forEach(function (el) {
+        el.classList.remove("drag-over");
+    });
+    dragSourceId = null;
+}
+
+/* =====================================================
+   LIVE STATUS - IDLE / ACTIVE
+   ===================================================== */
 
 function setLiveStatus(text, isLive) {
     const status = document.getElementById("liveStatus");
@@ -135,29 +370,60 @@ function setLiveStatus(text, isLive) {
     }
 }
 
+function showRole(device1Active, count) {
+    setLiveStatus(
+        device1Active
+            ? "IDLE \u2014 Device 1 is running (" + count + " readings)"
+            : "ACTIVE \u2014 Device 1 is down, Device 2 is producing data (" + count + " readings)",
+        !device1Active
+    );
+}
+
 function handleTick(newRow, totalCount) {
-    dashboardCharts.forEach(cfg => appendPoint("chart_" + cfg.id, newRow, PLOT_MAX_POINTS));
-    setLiveStatus("Device 2 Live — Active Worker: " + (newRow.activeDevice || "Unknown") + " (" + totalCount + " readings)", true);
+    dashboardCharts.forEach(function (cfg) {
+        appendPoint("chart_" + cfg.id, newRow, PLOT_MAX_POINTS);
+    });
+    showRole(!String(newRow.activeDevice || "").startsWith("Device 2"), totalCount);
 }
 
 async function initLiveControls() {
     const downloadBtn = document.getElementById("downloadLog");
-    try {
-        const status = await getFeedStatus();
-        setLiveStatus("Monitoring — " + status.count + " readings logged", true);
-    } catch (error) {
-        setLiveStatus("Backend unavailable", false);
+
+    async function refresh() {
+        try {
+            const s = await getFeedStatus();
+            showRole(s.device1Active, s.count);
+        } catch (error) {
+            setLiveStatus("Backend unavailable", false);
+        }
     }
 
+    await refresh();
+    // keeps the IDLE/ACTIVE label correct even when no ticks arrive
+    setInterval(refresh, 2000);
+
     if (downloadBtn) {
-        downloadBtn.addEventListener("click", async () => {
+        downloadBtn.addEventListener("click", async function () {
             downloadBtn.disabled = true;
-            try { await exportLogToExcel(); } catch (error) {} finally { downloadBtn.disabled = false; }
+            try {
+                await exportLogToExcel();
+            } catch (error) {
+                console.error("Excel export failed:", error);
+            } finally {
+                downloadBtn.disabled = false;
+            }
         });
     }
 }
 
-renderDashboard().then(() => {
+/* =====================================================
+   START
+   ===================================================== */
+
+renderDashboard().then(function () {
     onRealtimeTick(handleTick);
     initLiveControls();
-}).catch(err => console.error(err));
+}).catch(function (error) {
+    console.error("Dashboard 2 failed to load:", error);
+    setLiveStatus("Dashboard load failed: " + error.message, false);
+});
