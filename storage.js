@@ -32,15 +32,17 @@ async function initializeStorage() {
 }
 
 async function getFeedState() {
-    const res = await pool.query("SELECT running, last_values FROM feed_state WHERE key = 'd2_state'");
+    // Changed key from 'd2_state' to 'd1_state' so d-2 can monitor d-1 correctly
+    const res = await pool.query("SELECT running, last_values FROM feed_state WHERE key = 'd1_state'");
     if (res.rows.length === 0) return { running: false, last_values: {} };
     return res.rows[0];
 }
 
 async function setFeedState(running, values) {
+    // Changed key from 'd2_state' to 'd1_state'
     await pool.query(`
         INSERT INTO feed_state (key, running, last_values, updated_at)
-        VALUES ('d2_state', $1, $2, NOW())
+        VALUES ('d1_state', $1, $2, NOW())
         ON CONFLICT (key) DO UPDATE SET running = $1, last_values = $2, updated_at = NOW()
     `, [running, JSON.stringify(values)]);
 }
