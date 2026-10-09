@@ -28,6 +28,8 @@ class UnifiedEngine {
         this.values = initialValues();
         this.readingsLog = [];
         this.lastTickAt = 0;
+        
+        this.pushReading();
     }
 
     start() {

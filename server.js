@@ -16,7 +16,7 @@ function main() {
 
     const stream = createStreamHub();
     const engine = new UnifiedEngine(stream);
-    engine.start();
+    engine.start(); // Starts the 1-second interval immediately
 
     const server = http.createServer(async (req, res) => {
         try {
