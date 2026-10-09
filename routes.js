@@ -30,11 +30,9 @@ function createRoutes(storage, generator, stream, config) {
             return stream.handle(req, res, url);
         }
         if (req.method === "POST" && pathname === "/api/feed/start") {
-            if (!authorized(req)) return json(res, 401, { error: "Feed control authorization required." });
             return json(res, 200, await generator.start());
         }
         if (req.method === "POST" && pathname === "/api/feed/stop") {
-            if (!authorized(req)) return json(res, 401, { error: "Feed control authorization required." });
             return json(res, 200, await generator.stop());
         }
         return false;
