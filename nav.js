@@ -1,38 +1,17 @@
-/* =====================================================
-   HEADER + NAVIGATION
-
-   Each page only needs:
-   <div id="pageHeader"></div>
-   and nav.js builds the title, description and the
-   links to every page listed in pages.js.
-   ===================================================== */
-
 function currentFileName() {
     const path = window.location.pathname;
     const name = path.substring(path.lastIndexOf("/") + 1);
-
-    if (name === "" ) {
-        return "index.html";
-    }
-
+    if (name === "") return "index.html";
     return name;
 }
 
 function renderHeader() {
     const container = document.getElementById("pageHeader");
-
-    if (!container) {
-        return;
-    }
+    if (!container) return;
 
     const activeFile = currentFileName();
+    const page = PAGES.find(item => item.file === activeFile) || { title: document.title, description: "" };
 
-    const page =
-        PAGES.find(function (item) {
-            return item.file === activeFile;
-        }) || { title: document.title, description: "" };
-
-    /* HEADER */
     const header = document.createElement("div");
     header.className = "header";
 
@@ -46,25 +25,21 @@ function renderHeader() {
         header.appendChild(text);
     }
 
-    /* NAVIGATION */
     const nav = document.createElement("nav");
     nav.className = "nav";
 
-    PAGES.forEach(function (item) {
+    PAGES.forEach(item => {
         const link = document.createElement("a");
         link.href = item.file;
         link.textContent = item.title;
-
         if (item.file === activeFile) {
             link.className = "active";
         }
-
         nav.appendChild(link);
     });
 
     header.appendChild(nav);
     container.appendChild(header);
-
     document.title = page.title + " | Sensor Data Analysis";
 }
 

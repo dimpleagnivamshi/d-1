@@ -17,105 +17,70 @@ function nextValue(previous, cfg) {
     return Math.max(cfg.min, Math.min(cfg.max, previous + randomStep + pullToStart));
 }
 
-class FeedGenerator {
-    constructor(storage, stream, tickMs = 1000) {
-        this.storage = storage;
+class UnifiedEngine {
+    constructor(stream, tickMs = 1000) {
         this.stream = stream;
         this.tickMs = tickMs;
         this.timer = null;
-        this.running = false;
+        
+        this.device1Active = true;
         this.values = initialValues();
-        this.lastTickAt = 0;
+        this.readingsLog = [];
+        this.lastTickAt = Date.now();
+        
+        this.pushReading();
     }
 
-    async initialize() {
-        const state = await this.storage.getFeedState();
-        this.values = { ...initialValues(), ...(state.last_values || {}) };
-        const latest = await this.storage.getLatestReading();
-        if (latest) {
-            for (const key of Object.keys(DEFAULTS)) {
-                if (Number.isFinite(Number(latest[key]))) this.values[key] = Number(latest[key]);
-            }
+    start() {
+        if (this.timer) clearInterval(this.timer);
+        this.timer = setInterval(() => this.tick(), this.tickMs);
+    }
+
+    stop() {
+        if (this.timer) {
+            clearInterval(this.timer);
+            this.timer = null;
         }
-        if (state.running) await this.start();
     }
 
-    async status() {
-        const [state, count, latest] = await Promise.all([
-            this.storage.getFeedState(),
-            this.storage.getReadingCount(),
-            this.storage.getLatestReading()
-        ]);
+    pushReading() {
+        for (const [key, cfg] of Object.entries(DEFAULTS)) {
+            this.values[key] = nextValue(this.values[key], cfg);
+        }
+        const row = {
+            id: this.readingsLog.length + 1,
+            timestamp: new Date().toISOString(),
+            activeDevice: this.device1Active ? "Device 1 (Master Active)" : "Device 2 (Failover Active)",
+            ...this.values
+        };
+        this.readingsLog.push(row);
+        if (this.readingsLog.length > 5000) this.readingsLog.shift();
+        this.stream.publish(row);
+        return row;
+    }
+
+    tick() {
+        const currentRow = this.pushReading();
+        return currentRow;
+    }
+
+    setDevice1State(active) {
+        this.device1Active = Boolean(active);
+        return { device1Active: this.device1Active, activeWorker: this.device1Active ? "Device 1" : "Device 2" };
+    }
+
+    getStatus() {
         return {
-            running: this.running && state.running,
-            count,
-            latestId: latest ? latest.id : 0,
-            latestTimestamp: latest ? latest.timestamp : null
+            device1Active: this.device1Active,
+            activeWorker: this.device1Active ? "Device 1 (Master Active)" : "Device 2 (Failover Active)",
+            count: this.readingsLog.length,
+            latest: this.readingsLog[this.readingsLog.length - 1] || null
         };
     }
 
-    async start() {
-        if (this.running) return this.status();
-        this.running = true;
-        if (this.timer) clearTimeout(this.timer);
-        await this.storage.setFeedState(true, this.values);
-        this.lastTickAt = Date.now();
-        this.schedule(this.tickMs);
-        return this.status();
-    }
-
-    async stop() {
-        this.running = false;
-        if (this.timer) {
-            clearTimeout(this.timer);
-            this.timer = null;
-        }
-        await this.storage.setFeedState(false, this.values);
-        return this.status();
-    }
-
-    schedule(delay) {
-        if (!this.running) return;
-        if (this.timer) clearTimeout(this.timer);
-        this.timer = setTimeout(() => this.tick(), delay);
-    }
-
-    async tick() {
-        if (!this.running) return;
-        
-        const now = Date.now();
-        const row = { timestamp: new Date(now).toISOString() };
-
-        for (const [key, cfg] of Object.entries(DEFAULTS)) {
-            this.values[key] = nextValue(this.values[key], cfg);
-            row[key] = this.values[key];
-        }
-
-        if (!this.running) return;
-
-        try {
-            // Save reading and publish immediately via SSE without waiting for state sync
-            const saved = await this.storage.saveReading(row);
-            if (!this.running) return;
-
-            this.stream.publish(saved);
-
-            // Non-blocking background state sync
-            this.storage.setFeedState(true, this.values).catch(err => {
-                console.error("Background feed state sync failed:", err.message);
-            });
-        } catch (error) {
-            console.error("Sensor reading could not be persisted", error);
-        }
-
-        this.lastTickAt = now;
-        if (this.running) {
-            const elapsed = Date.now() - now;
-            const nextDelay = Math.max(0, this.tickMs - elapsed);
-            this.schedule(nextDelay);
-        }
+    getReadings(limit = 100) {
+        return this.readingsLog.slice(-limit);
     }
 }
 
-module.exports = { FeedGenerator, initialValues };
-
+module.exports = { UnifiedEngine };
