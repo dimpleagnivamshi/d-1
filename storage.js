@@ -2,25 +2,37 @@ const { Pool } = require("pg");
 
 const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
-    ssl: { rejectUnauthorized: false }
+    ssl: { rejectUnauthorized: false },
+    connectionTimeoutMillis: 10000, // Wait up to 10s for cold starts
+    idleTimeoutMillis: 30000
+});
+
+pool.on('error', (err) => {
+    console.error('Unexpected database pool error:', err);
 });
 
 async function initializeStorage() {
-    await pool.query(`
-        CREATE TABLE IF NOT EXISTS telemetry_active_stream (
-            id SERIAL PRIMARY KEY,
-            timestamp TIMESTAMPTZ NOT NULL,
-            payload JSONB NOT NULL
-        )
-    `);
-    await pool.query(`
-        CREATE TABLE IF NOT EXISTS feed_state (
-            key VARCHAR(50) PRIMARY KEY,
-            running BOOLEAN NOT NULL,
-            last_values JSONB NOT NULL,
-            updated_at TIMESTAMPTZ NOT NULL
-        )
-    `);
+    try {
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS telemetry_active_stream (
+                id SERIAL PRIMARY KEY,
+                timestamp TIMESTAMPTZ NOT NULL,
+                payload JSONB NOT NULL
+            )
+        `);
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS feed_state (
+                key VARCHAR(50) PRIMARY KEY,
+                running BOOLEAN NOT NULL,
+                last_values JSONB NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL
+            )
+        `);
+        console.log("Database storage initialized successfully.");
+    } catch (err) {
+        console.error("Failed to initialize storage tables:", err);
+        throw err;
+    }
 }
 
 async function getFeedState() {
