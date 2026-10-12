@@ -1,24 +1,45 @@
 /* Pump model fitted to rittal_report_20260817_115012.xlsx
-   - dP[bar]      = K_DP * RPM^2 (pump affinity law, fitted: K_DP ~ 3.5e-7, r = 0.997)
-   - P1           = P2 + dP
-   - P2           ~ 1.127 - 5.5e-5 * RPM   (suction side rises a little at low speed)
-   - RPM range    : 905 (minimum operating speed) .. 2395 (max)
-   - RPM ramps up, then HOLDS once the process value reaches the setpoint (no overshoot)
-   Two control modes, both entered manually:
-     "dp"   -> hold a constant differential pressure (bar)
-     "flow" -> hold a constant flow (L/min)  [flow assumed proportional to RPM] */
+   - dP[bar]  = K_DP * RPM^2          (fitted from the report, r = 0.997)
+   - P1       = P2 + dP
+   - P2       ~ 1.127 - 5.5e-5 * RPM, plus a slow bounded drift
+   - RPM      : 905 (minimum operating speed) .. 2395 (max)
+
+   "dp"   mode : hold a constant differential pressure (bar). RPM climbs until dP
+                 reaches the setpoint, then HOLDS (no overshoot).
+   "flow" mode : hold a constant flow (L/min). Each flow is a FIXED operating
+                 point: RPM and dP go to one fixed value and stay flat.
+                 P1 and P2 still vary slowly. */
 
 const K_DP = 3.5e-7;
 const RPM_MIN = 905;
 const RPM_MAX = 2395;
 
-/* !!! CALIBRATE: your report has no flow column, so this is an assumption.
-   Flow is taken as proportional to RPM, with FLOW_AT_MAX_RPM at 2395 RPM. */
-const FLOW_AT_MAX_RPM = 3000;                 // L/min
-const FLOW_PER_RPM = FLOW_AT_MAX_RPM / RPM_MAX;
+/* !!! ASSUMPTION - CALIBRATE WITH YOUR REAL PUMP !!!
+   The report has no flow column, so these flow -> RPM points are assumed.
+   They reuse the report's four steady states (0.5 / 1 / 1.5 / 2 bar).
+   Values between the points are linearly interpolated. */
+const FLOW_TABLE = [      // [ flow L/min, RPM ]
+    [500, 905],           // minimum operating speed
+    [1000, 1190],         // ~0.50 bar
+    [1500, 1685],         // ~1.00 bar
+    [2000, 2070],         // ~1.50 bar
+    [2500, 2390]          // ~2.00 bar
+];
+const FLOW_MIN = 0;
+const FLOW_MAX = FLOW_TABLE[FLOW_TABLE.length - 1][0];
+
+function flowToRpm(flow) {
+    if (flow <= FLOW_TABLE[0][0]) return FLOW_TABLE[0][1];
+    for (let i = 1; i < FLOW_TABLE.length; i++) {
+        const [f0, r0] = FLOW_TABLE[i - 1];
+        const [f1, r1] = FLOW_TABLE[i];
+        if (flow <= f1) return r0 + (r1 - r0) * (flow - f0) / (f1 - f0);
+    }
+    return FLOW_TABLE[FLOW_TABLE.length - 1][1];
+}
 
 const DP_RANGE = 2.0;                         // bar (full scale)
-const FLOW_RANGE = FLOW_AT_MAX_RPM;           // L/min (full scale)
+const RPM_RANGE = RPM_MAX - RPM_MIN;
 
 /* controller / plant tuning, matched to the settling times in the report */
 const KN = 55;          // RPM/s per unit of full-scale error
@@ -26,6 +47,8 @@ const SLEW_UP = 25;     // max RPM rise per second
 const SLEW_DOWN = 30;   // max RPM fall per second
 const TAU_DP = 6;       // s, dP lag behind RPM
 const TAU_P2 = 8;       // s, P2 lag
+const FLOW_MIN_STEP = 6;     // RPM/s, minimum speed when closing in on a flow's fixed RPM
+const P2_DRIFT_MAX = 0.04;   // bar, slow wander of P2 (P1 follows because P1 = P2 + dP)
 
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 function gauss() {
@@ -36,13 +59,14 @@ function gauss() {
 }
 const p2Target = rpm => 1.127 - 5.5e-5 * rpm;
 
-const LIMITS = { dpMin: 0, dpMax: 2.0, flowMin: 0, flowMax: FLOW_AT_MAX_RPM };
+const LIMITS = { dpMin: 0, dpMax: 2.0, flowMin: FLOW_MIN, flowMax: FLOW_MAX };
 
 class PumpModel {
     constructor() {
         this.rpm = RPM_MIN;
         this.dp = K_DP * this.rpm * this.rpm;
         this.p2 = p2Target(this.rpm);
+        this.drift = 0;
     }
 
     /* continue from the last stored reading (used on failover / resume) */
@@ -52,30 +76,43 @@ class PumpModel {
         if (Number.isFinite(rpm)) this.rpm = clamp(rpm, RPM_MIN, RPM_MAX);
         this.dp = Number.isFinite(dp) ? dp : K_DP * this.rpm * this.rpm;
         this.p2 = Number.isFinite(p2) ? p2 : p2Target(this.rpm);
+        this.drift = 0;
     }
 
     /* advance one second under control = { mode, constDp, constFlow } */
     step(control, dt = 1) {
         const flowMode = control.mode === "flow";
-        const sp = flowMode ? Number(control.constFlow) : Number(control.constDp);
-        const pv = flowMode ? FLOW_PER_RPM * this.rpm : this.dp;
-        const range = flowMode ? FLOW_RANGE : DP_RANGE;
+        let dpSetpoint, targetRpm;
 
-        // RPM rises while the process value is below the setpoint, stops (holds) at the setpoint
-        const cmd = clamp(KN * (sp - pv) / range, -SLEW_DOWN, SLEW_UP);
-        this.rpm = clamp(this.rpm + cmd * dt, RPM_MIN, RPM_MAX);
+        if (flowMode) {
+            targetRpm = clamp(flowToRpm(Number(control.constFlow)), RPM_MIN, RPM_MAX);
+            dpSetpoint = K_DP * targetRpm * targetRpm;
+            // ramp to the fixed operating point, then hold it exactly
+            const err = targetRpm - this.rpm;
+            let cmd = clamp(KN * err / RPM_RANGE, -SLEW_DOWN, SLEW_UP);
+            // minimum approach speed so it lands exactly on the fixed value (no endless creep)
+            if (Math.abs(cmd) < FLOW_MIN_STEP) cmd = Math.sign(err) * Math.min(FLOW_MIN_STEP, Math.abs(err) / dt);
+            this.rpm = clamp(this.rpm + cmd * dt, RPM_MIN, RPM_MAX);
+            if (Math.abs(targetRpm - this.rpm) < 0.01) this.rpm = targetRpm;
+        } else {
+            dpSetpoint = Number(control.constDp);
+            // RPM rises while dP is below the setpoint, stops (holds) at the setpoint
+            const cmd = clamp(KN * (dpSetpoint - this.dp) / DP_RANGE, -SLEW_DOWN, SLEW_UP);
+            this.rpm = clamp(this.rpm + cmd * dt, RPM_MIN, RPM_MAX);
+        }
 
         this.dp += (K_DP * this.rpm * this.rpm - this.dp) * (1 - Math.exp(-dt / TAU_DP));
-        this.p2 += (p2Target(this.rpm) - this.p2) * (1 - Math.exp(-dt / TAU_P2));
+        if (flowMode && this.rpm === targetRpm && Math.abs(this.dp - dpSetpoint) < 0.0005) this.dp = dpSetpoint;
 
-        // setpoint dP shown in TCS_dP_P1_P2 / dP_SetpointDiff
-        const dpSetpoint = flowMode
-            ? K_DP * Math.pow(sp / FLOW_PER_RPM, 2)
-            : sp;
+        // P2 follows RPM and also wanders slowly (bounded); P1 = P2 + dP follows it
+        this.drift = clamp(this.drift * 0.98 + gauss() * 0.004, -P2_DRIFT_MAX, P2_DRIFT_MAX);
+        this.p2 += (p2Target(this.rpm) + this.drift - this.p2) * (1 - Math.exp(-dt / TAU_P2));
 
-        // measured values carry a little sensor noise (as in the report's steady state)
-        const rpmOut = Math.round(clamp(this.rpm + gauss() * 2.5, RPM_MIN - 5, RPM_MAX));
-        const dpOut = Math.max(0, this.dp + gauss() * 0.004);
+        // flow mode: RPM and dP are perfectly flat; dP mode: small sensor noise as in the report
+        const rpmOut = flowMode
+            ? Math.round(this.rpm)
+            : Math.round(clamp(this.rpm + gauss() * 2.5, RPM_MIN - 5, RPM_MAX));
+        const dpOut = flowMode ? this.dp : Math.max(0, this.dp + gauss() * 0.004);
         const p2Out = this.p2 + gauss() * 0.002;
         const p1Out = p2Out + dpOut;
         const r3 = v => Math.round(v * 1000) / 1000;
@@ -85,7 +122,7 @@ class PumpModel {
             P2: r3(p2Out),
             dP: r3(dpOut),
             RPM: rpmOut,
-            dP_SetpointDiff: r3(dpOut - dpSetpoint),
+            dP_SetpointDiff: r3(r3(dpOut) - r3(dpSetpoint)),
             TCS_dP_P1_P2: r3(dpSetpoint),
             ConstDP: Number(control.constDp),
             ConstFlow: Number(control.constFlow),
