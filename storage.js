@@ -31,6 +31,8 @@ async function initializeStorage() {
     `);
 }
 
+/* Device 1 heartbeat. age_ms is computed by the database clock, so clock
+   differences between this server and Neon do not matter. */
 async function getFeedState() {
     const res = await pool.query(`
         SELECT running, last_values,
@@ -40,13 +42,27 @@ async function getFeedState() {
     const r = res.rows[0];
     return { running: r.running, last_values: r.last_values, age_ms: Number(r.age_ms) };
 }
+
 async function setFeedState(running, values) {
-    // Changed key from 'd2_state' to 'd1_state'
     await pool.query(`
         INSERT INTO feed_state (key, running, last_values, updated_at)
         VALUES ('d1_state', $1, $2, NOW())
         ON CONFLICT (key) DO UPDATE SET running = $1, last_values = $2, updated_at = NOW()
     `, [running, JSON.stringify(values)]);
+}
+
+/* Manual setpoints: { mode: "dp" | "flow", constDp, constFlow } */
+async function getSetpoint() {
+    const res = await pool.query("SELECT last_values FROM feed_state WHERE key = 'setpoint'");
+    return res.rows.length ? res.rows[0].last_values : null;
+}
+
+async function setSetpoint(control) {
+    await pool.query(`
+        INSERT INTO feed_state (key, running, last_values, updated_at)
+        VALUES ('setpoint', true, $1, NOW())
+        ON CONFLICT (key) DO UPDATE SET last_values = $1, updated_at = NOW()
+    `, [JSON.stringify(control)]);
 }
 
 async function saveReading(reading) {
@@ -98,6 +114,8 @@ module.exports = {
     initializeStorage,
     getFeedState,
     setFeedState,
+    getSetpoint,
+    setSetpoint,
     saveReading,
     getLatestReading,
     getReadingCount,

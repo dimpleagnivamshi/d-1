@@ -470,6 +470,7 @@ async function initLiveControls() {
     const downloadBtn = document.getElementById("downloadLog");
 
     await syncInterruptButton();
+    initSetpointPanel();
 
     try {
         const status = await getFeedStatus();
@@ -508,3 +509,63 @@ renderDashboard().then(function () {
     console.error("Dashboard failed to load:", error);
     setLiveStatus("Dashboard load failed: " + error.message, false);
 });
+
+/* =====================================================
+   MANUAL SETPOINT PANEL (const dP / const flow)
+   ===================================================== */
+
+function setSetpointMessage(text, isError) {
+    const el = document.getElementById("spMsg");
+    if (!el) return;
+    el.textContent = text;
+    el.style.color = isError ? "#dc2626" : "#16a34a";
+}
+
+function updateSetpointInputs() {
+    const mode = document.getElementById("spMode").value;
+    document.getElementById("spDpWrap").style.opacity = mode === "dp" ? "1" : "0.45";
+    document.getElementById("spFlowWrap").style.opacity = mode === "flow" ? "1" : "0.45";
+}
+
+async function initSetpointPanel() {
+    const modeEl = document.getElementById("spMode");
+    const dpEl = document.getElementById("spDp");
+    const flowEl = document.getElementById("spFlow");
+    const applyBtn = document.getElementById("btnApplySetpoint");
+    if (!modeEl || !dpEl || !flowEl || !applyBtn) return;
+
+    try {
+        const sp = await apiRequest("/api/setpoint");
+        modeEl.value = sp.mode;
+        dpEl.value = sp.constDp;
+        flowEl.value = sp.constFlow;
+        setSetpointMessage("Active: " + (sp.mode === "dp" ? "Const dP " + sp.constDp + " bar" : "Const Flow " + sp.constFlow + " L/min"), false);
+    } catch (e) {
+        setSetpointMessage("Could not load setpoint: " + e.message, true);
+    }
+
+    modeEl.addEventListener("change", updateSetpointInputs);
+    updateSetpointInputs();
+
+    applyBtn.addEventListener("click", async function () {
+        applyBtn.disabled = true;
+        try {
+            const res = await fetch("/api/setpoint", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    mode: modeEl.value,
+                    constDp: Number(dpEl.value),
+                    constFlow: Number(flowEl.value)
+                })
+            });
+            const result = await res.json();
+            if (!res.ok) throw new Error(result.error || "Request failed");
+            setSetpointMessage("Applied: " + (result.mode === "dp" ? "Const dP " + result.constDp + " bar" : "Const Flow " + result.constFlow + " L/min") + " \u2014 RPM is adjusting", false);
+        } catch (e) {
+            setSetpointMessage(e.message, true);
+        } finally {
+            applyBtn.disabled = false;
+        }
+    });
+}

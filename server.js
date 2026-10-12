@@ -21,6 +21,7 @@ async function main() {
 
     const stream = createStreamHub();
     const engine = new FailoverEngine(stream);
+    await engine.init();                        // load last manual const dP / const flow
     await storage.setFeedState(true, {});       // D1 starts healthy
     engine.start();
 
@@ -44,6 +45,20 @@ async function main() {
             }
 
             if (url.pathname === "/api/stream") return stream.handle(req, res, url);
+
+            // manual setpoints: { mode: "dp" | "flow", constDp: bar, constFlow: L/min }
+            if (url.pathname === "/api/setpoint") {
+                if (req.method === "GET") return sendJson(200, engine.getControl());
+                if (req.method === "POST") {
+                    let body = "";
+                    for await (const chunk of req) body += chunk;
+                    let parsed;
+                    try { parsed = JSON.parse(body); } catch { return sendJson(400, { error: "Invalid JSON" }); }
+                    const result = await engine.setControl(parsed);
+                    if (!result.ok) return sendJson(400, { error: result.error });
+                    return sendJson(200, { success: true, ...result.value });
+                }
+            }
 
             if (req.method === "POST" && url.pathname === "/api/device1/interrupt") {
                 let body = "";

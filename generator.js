@@ -1,36 +1,20 @@
 const storage = require("./storage");
-
-const DEFAULTS = {
-    P1: { start: 2.348, min: 1.138, max: 3.034, volatility: 0.04 },
-    P2: { start: 1.023, min: 0.948, max: 1.138, volatility: 0.004 },
-    dP: { start: 1.325, min: 0.001, max: 2.012, volatility: 0.04 },
-    RPM: { start: 1883.676, min: 542, max: 2395, volatility: 35 },
-    dP_SetpointDiff: { start: -0.039, min: -1.710, max: 1.992, volatility: 0.06 },
-    TCS_dP_P1_P2: { start: 1.363, min: 0, max: 2.0, volatility: 0.04 }
-};
+const { PumpModel, validateControl } = require("./pumpmodel");
 
 const HEARTBEAT_STALE_MS = 3500;
-
-function initialValues() {
-    return Object.fromEntries(Object.entries(DEFAULTS).map(([k, c]) => [k, c.start]));
-}
-
-function nextValue(previous, cfg) {
-    const step = (Math.random() - 0.5) * 2 * cfg.volatility;
-    const pull = (cfg.start - previous) * 0.02;
-    return Math.max(cfg.min, Math.min(cfg.max, previous + step + pull));
-}
+const DEFAULT_CONTROL = { mode: "dp", constDp: 1.0, constFlow: 1500 };
 
 class DeviceWorker {
-    constructor({ name, stream, tickMs = 1000 }) {
+    constructor({ name, stream, getControl, tickMs = 1000 }) {
         this.name = name;
         this.stream = stream;
+        this.getControl = getControl;      // shared manual setpoints (same for both devices)
         this.tickMs = tickMs;
         this.timer = null;
         this.running = false;
         this.wasActive = false;
         this.nextAt = 0;
-        this.values = initialValues();
+        this.model = new PumpModel();
     }
 
     start(delay = 0) {
@@ -57,7 +41,7 @@ class DeviceWorker {
         try {
             const active = await this.shouldBeActive();
             if (active) {
-                if (!this.wasActive) await this.loadContinuity(); // take over from last value
+                if (!this.wasActive) await this.loadContinuity(); // take over from last RPM / dP / P2
                 await this.produce();
             }
             this.wasActive = active;
@@ -70,23 +54,15 @@ class DeviceWorker {
     }
 
     async loadContinuity() {
-        const latest = await storage.getLatestReading();
-        this.values = initialValues();
-        if (latest) {
-            for (const key of Object.keys(DEFAULTS)) {
-                if (Number.isFinite(Number(latest[key]))) this.values[key] = Number(latest[key]);
-            }
-        }
+        this.model.restore(await storage.getLatestReading());
     }
 
     async produce() {
-        for (const [key, cfg] of Object.entries(DEFAULTS)) {
-            this.values[key] = nextValue(this.values[key], cfg);
-        }
+        const values = this.model.step(this.getControl());
         const saved = await storage.saveReading({
             timestamp: new Date().toISOString(),
             activeDevice: this.name,
-            ...this.values
+            ...values
         });
         this.stream.publish(saved);
         return saved;
@@ -95,8 +71,8 @@ class DeviceWorker {
 
 /* ---------- Device 1 (Master) ---------- */
 class Device1Worker extends DeviceWorker {
-    constructor(stream) {
-        super({ name: "Device 1 (Master Active)", stream });
+    constructor(stream, getControl) {
+        super({ name: "Device 1 (Master Active)", stream, getControl });
         this.interrupted = false;
         this.stateChain = Promise.resolve();   // keeps feed_state writes in order
     }
@@ -111,10 +87,8 @@ class Device1Worker extends DeviceWorker {
 
     async produce() {
         const saved = await super.produce();
-        // heartbeat: not awaited, so it never delays the next reading.
-        // The interrupted check runs when the write actually executes, so a late
-        // heartbeat can never overwrite the "interrupted" state.
-        const snapshot = { ...this.values };
+        // heartbeat is not awaited; the interrupted check runs when the write executes
+        const snapshot = { RPM: saved.RPM, dP: saved.dP };
         this.queueState(async () => {
             if (!this.interrupted) await storage.setFeedState(true, snapshot);
         }).catch(() => {});
@@ -124,16 +98,14 @@ class Device1Worker extends DeviceWorker {
     async setInterrupted(flag) {
         this.interrupted = flag;
         if (flag) this.wasActive = false;                // reload values on resume
-        const snapshot = { ...this.values };
-        // written in order, right away, so D2 reacts on its next tick
-        await this.queueState(() => storage.setFeedState(!flag, snapshot));
+        await this.queueState(() => storage.setFeedState(!flag, {}));
     }
 }
 
 /* ---------- Device 2 (Failover) ---------- */
 class Device2Worker extends DeviceWorker {
-    constructor(stream) {
-        super({ name: "Device 2 (Failover Active)", stream });
+    constructor(stream, getControl) {
+        super({ name: "Device 2 (Failover Active)", stream, getControl });
     }
 
     async shouldBeActive() {
@@ -146,8 +118,23 @@ class Device2Worker extends DeviceWorker {
 /* ---------- Facade used by server.js ---------- */
 class FailoverEngine {
     constructor(stream) {
-        this.d1 = new Device1Worker(stream);
-        this.d2 = new Device2Worker(stream);
+        this.control = { ...DEFAULT_CONTROL };      // manual const dP / const flow
+        const getControl = () => this.control;
+        this.d1 = new Device1Worker(stream, getControl);
+        this.d2 = new Device2Worker(stream, getControl);
+    }
+
+    /* load the last manual setpoints saved in Neon (survives restarts) */
+    async init() {
+        try {
+            const saved = await storage.getSetpoint();
+            if (saved) {
+                const v = validateControl(saved, this.control);
+                if (v.ok) this.control = v.value;
+            }
+        } catch (e) {
+            console.error("Could not load saved setpoint:", e.message);
+        }
     }
 
     start() {
@@ -156,6 +143,16 @@ class FailoverEngine {
     }
 
     stop() { this.d1.stop(); this.d2.stop(); }
+
+    getControl() { return { ...this.control }; }
+
+    async setControl(input) {
+        const v = validateControl(input || {}, this.control);
+        if (!v.ok) return v;
+        this.control = v.value;                       // takes effect on the very next second
+        await storage.setSetpoint(this.control);      // persisted: both devices + restarts use it
+        return { ok: true, value: this.getControl() };
+    }
 
     async setDevice1State(active) {
         await this.d1.setInterrupted(!active);
@@ -169,7 +166,8 @@ class FailoverEngine {
             device1Active,
             activeWorker: device1Active ? "Device 1 (Master Active)" : "Device 2 (Failover Active)",
             count: latest ? latest.id : 0,
-            latest
+            latest,
+            control: this.getControl()
         };
     }
 }

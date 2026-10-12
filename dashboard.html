@@ -31,6 +31,24 @@
         </button>
     </div>
 
+    <!-- MANUAL SETPOINT: CONST dP / CONST FLOW -->
+    <div class="control-panel" style="margin-bottom: 20px; padding: 15px; background: #f8fafc; border-radius: 8px; border: 1px solid #e2e8f0; display: flex; gap: 16px; align-items: flex-end; flex-wrap: wrap;">
+        <label>Control mode<br>
+            <select id="spMode">
+                <option value="dp">Const dP</option>
+                <option value="flow">Const Flow</option>
+            </select>
+        </label>
+        <label id="spDpWrap">Const dP (bar)<br>
+            <input id="spDp" type="number" step="0.1" min="0" max="2" style="width: 100px;">
+        </label>
+        <label id="spFlowWrap">Const Flow (L/min)<br>
+            <input id="spFlow" type="number" step="10" min="0" max="3000" style="width: 120px;">
+        </label>
+        <button id="btnApplySetpoint" style="padding: 10px 20px; background: #2563eb; color: #fff; border: none; border-radius: 6px; cursor: pointer; font-weight: bold;">Apply</button>
+        <span id="spMsg" style="font-weight: bold;"></span>
+    </div>
+
     <!-- Charts are inserted here by dashboard.js -->
     <div id="chartGrid" class="dashboard-grid"></div>
 

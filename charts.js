@@ -5,7 +5,9 @@ const COLUMNS = [
     { key: "dP", label: "dP" },
     { key: "RPM", label: "RPM" },
     { key: "dP_SetpointDiff", label: "dP Setpoint Difference" },
-    { key: "TCS_dP_P1_P2", label: "TCS dP P1 P2" }
+    { key: "TCS_dP_P1_P2", label: "TCS dP P1 P2" },
+    { key: "ConstDP", label: "Const dP" },
+    { key: "ConstFlow", label: "Const Flow" }
 ];
 
 const COLUMN_LABELS = {};
@@ -96,7 +98,7 @@ function appendPoint(canvasId, row, maxPoints) {
     const data = chart.data.datasets[0].data;
     data.push({ x, y: val });
     if (maxPoints && data.length > maxPoints) data.shift();
-    
+
     // 'none' disables transition animations so the point plots instantly
     chart.update("none");
 }
