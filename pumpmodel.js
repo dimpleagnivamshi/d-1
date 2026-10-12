@@ -38,6 +38,17 @@ function flowToRpm(flow) {
     return FLOW_TABLE[FLOW_TABLE.length - 1][1];
 }
 
+/* Flow (L/min) at a given RPM: inverse of FLOW_TABLE, so Flow can be plotted in BOTH modes */
+function rpmToFlow(rpm) {
+    if (rpm <= FLOW_TABLE[0][1]) return FLOW_TABLE[0][0] * Math.max(0, rpm) / FLOW_TABLE[0][1];
+    for (let i = 1; i < FLOW_TABLE.length; i++) {
+        const [f0, r0] = FLOW_TABLE[i - 1];
+        const [f1, r1] = FLOW_TABLE[i];
+        if (rpm <= r1) return f0 + (f1 - f0) * (rpm - r0) / (r1 - r0);
+    }
+    return FLOW_MAX;
+}
+
 const DP_RANGE = 2.0;                         // bar (full scale)
 const RPM_RANGE = RPM_MAX - RPM_MIN;
 
@@ -122,6 +133,7 @@ class PumpModel {
             P2: r3(p2Out),
             dP: r3(dpOut),
             RPM: rpmOut,
+            Flow: Math.round(rpmToFlow(this.rpm) * 10) / 10,
             dP_SetpointDiff: r3(r3(dpOut) - r3(dpSetpoint)),
             TCS_dP_P1_P2: r3(dpSetpoint),
             ConstDP: Number(control.constDp),

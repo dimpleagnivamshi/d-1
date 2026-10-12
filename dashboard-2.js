@@ -2,13 +2,14 @@
    Shows IDLE while Device 1 is healthy, ACTIVE when Device 2 has taken over.
    Charts load history from the backend (Neon) and update live over SSE. */
 const PLOT_MAX_POINTS = 100;
-const STORAGE_KEY = "dashboard_2_charts_v3";
+const STORAGE_KEY = "dashboard_2_charts_v4";
 
 const DEFAULT_CHARTS = [
     { id: "c1", title: "P1 vs Time", x: "timestamp", y: "P1", color: "#16a34a", timeFormat: "seconds" },
     { id: "c2", title: "P2 vs Time", x: "timestamp", y: "P2", color: "#2563eb", timeFormat: "seconds" },
-    { id: "c3", title: "dP vs Time", x: "timestamp", y: "dP", color: "#dc2626", timeFormat: "seconds" },
-    { id: "c4", title: "RPM vs Time", x: "timestamp", y: "RPM", color: "#9333ea", timeFormat: "seconds" }
+    { id: "c3", title: "dP vs Time (dashed = dP setpoint)", x: "timestamp", y: "dP", color: "#dc2626", timeFormat: "seconds", overlay: "TCS_dP_P1_P2" },
+    { id: "c4", title: "RPM vs Time", x: "timestamp", y: "RPM", color: "#9333ea", timeFormat: "seconds" },
+    { id: "c5", title: "Flow vs Time", x: "timestamp", y: "Flow", color: "#0891b2", timeFormat: "seconds" }
 ];
 
 const COLOR_PALETTE = [
@@ -45,7 +46,8 @@ async function refreshCharts() {
             compact: true,
             title: null,
             timeFormat: cfg.timeFormat || "seconds",
-            aggregate: true
+            aggregate: true,
+            overlay: cfg.overlay
         });
         if (cfg.x === "timestamp") {
             setChartPrecision("chart_" + cfg.id, cfg.timeFormat || "seconds");

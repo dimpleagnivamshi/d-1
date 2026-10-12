@@ -2,13 +2,14 @@
    Loads history from the backend (Neon) and updates live over SSE.
    Also holds the "Interrupt Device 1" button, whose state follows the SERVER. */
 const PLOT_MAX_POINTS = 100;
-const STORAGE_KEY = "dashboard_charts_v3";
+const STORAGE_KEY = "dashboard_charts_v4";
 
 const DEFAULT_CHARTS = [
     { id: "c1", title: "P1 vs Time", x: "timestamp", y: "P1", color: "#2563eb", timeFormat: "seconds" },
     { id: "c2", title: "P2 vs Time", x: "timestamp", y: "P2", color: "#16a34a", timeFormat: "seconds" },
-    { id: "c3", title: "dP vs Time", x: "timestamp", y: "dP", color: "#dc2626", timeFormat: "seconds" },
-    { id: "c4", title: "RPM vs Time", x: "timestamp", y: "RPM", color: "#9333ea", timeFormat: "seconds" }
+    { id: "c3", title: "dP vs Time (dashed = dP setpoint)", x: "timestamp", y: "dP", color: "#dc2626", timeFormat: "seconds", overlay: "TCS_dP_P1_P2" },
+    { id: "c4", title: "RPM vs Time", x: "timestamp", y: "RPM", color: "#9333ea", timeFormat: "seconds" },
+    { id: "c5", title: "Flow vs Time", x: "timestamp", y: "Flow", color: "#0891b2", timeFormat: "seconds" }
 ];
 
 const COLOR_PALETTE = [
@@ -46,7 +47,8 @@ async function refreshCharts() {
             compact: true,
             title: null,
             timeFormat: cfg.timeFormat || "seconds",
-            aggregate: true
+            aggregate: true,
+            overlay: cfg.overlay
         });
         if (cfg.x === "timestamp") {
             setChartPrecision("chart_" + cfg.id, cfg.timeFormat || "seconds");
@@ -459,7 +461,7 @@ async function handleTick(newRow, totalCount) {
             pendingRows = [];
         }
         plotRow(newRow);
-        setLiveStatus("Live \u2014 Device 1 producing data (" + totalCount + " readings)", true);
+        setLiveStatus("Live \u2014 Device 1 producing data \u2014 " + (newRow.ControlMode || "") + " (" + totalCount + " readings)", true);
     } else {
         isPlotting = false;   // chart stays frozen while Device 2 is active
         setLiveStatus("Device 1 interrupted \u2014 Device 2 is producing data (" + totalCount + " readings)", false);

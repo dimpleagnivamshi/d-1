@@ -4,6 +4,7 @@ const COLUMNS = [
     { key: "P2", label: "P2" },
     { key: "dP", label: "dP" },
     { key: "RPM", label: "RPM" },
+    { key: "Flow", label: "Flow" },
     { key: "dP_SetpointDiff", label: "dP Setpoint Difference" },
     { key: "TCS_dP_P1_P2", label: "TCS dP P1 P2" },
     { key: "ConstDP", label: "Const dP" },
@@ -57,18 +58,35 @@ function createChart(canvasId, rows, settings) {
     const points = buildPoints(rows, xKey, yKey);
     if (chartRegistry[canvasId]) chartRegistry[canvasId].destroy();
 
+    const datasets = [{
+        label: axisLabel(yKey),
+        data: points,
+        showLine: true,
+        borderColor: settings.color || "#2563eb",
+        backgroundColor: settings.color || "#2563eb",
+        pointRadius: 0,
+        pointHoverRadius: 5
+    }];
+
+    // optional dashed setpoint line (e.g. the const dP target drawn on the dP chart)
+    if (settings.overlay && xKey === "timestamp") {
+        datasets.push({
+            label: axisLabel(settings.overlay) + " (setpoint)",
+            overlayKey: settings.overlay,
+            data: buildPoints(rows, xKey, settings.overlay),
+            showLine: true,
+            borderColor: "#64748b",
+            backgroundColor: "#64748b",
+            borderDash: [6, 4],
+            borderWidth: 1.5,
+            pointRadius: 0
+        });
+    }
+
     chartRegistry[canvasId] = new Chart(canvas, {
         type: "scatter",
         data: {
-            datasets: [{
-                label: axisLabel(yKey),
-                data: points,
-                showLine: true,
-                borderColor: settings.color || "#2563eb",
-                backgroundColor: settings.color || "#2563eb",
-                pointRadius: 0,
-                pointHoverRadius: 5
-            }]
+            datasets: datasets
         },
         options: {
             responsive: true,
@@ -98,6 +116,15 @@ function appendPoint(canvasId, row, maxPoints) {
     const data = chart.data.datasets[0].data;
     data.push({ x, y: val });
     if (maxPoints && data.length > maxPoints) data.shift();
+
+    const overlay = chart.data.datasets[1];
+    if (overlay && overlay.overlayKey) {
+        const ov = Number(row[overlay.overlayKey]);
+        if (Number.isFinite(ov)) {
+            overlay.data.push({ x, y: ov });
+            if (maxPoints && overlay.data.length > maxPoints) overlay.data.shift();
+        }
+    }
 
     // 'none' disables transition animations so the point plots instantly
     chart.update("none");
