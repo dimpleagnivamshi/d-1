@@ -41,7 +41,8 @@ function buildPoints(rows, xKey, yKey) {
         const y = Number(row[yKey]);
         if (Number.isFinite(x) && Number.isFinite(y)) points.push({ x, y });
     });
-    points.sort((a, b) => a.x - b.x);
+    // time axis: sort by time. Any other X (Flow, Const Flow, ...): keep time order so the path is readable
+    if (xKey === "timestamp") points.sort((a, b) => a.x - b.x);
     return points;
 }
 
@@ -64,7 +65,7 @@ function createChart(canvasId, rows, settings) {
         showLine: true,
         borderColor: settings.color || "#2563eb",
         backgroundColor: settings.color || "#2563eb",
-        pointRadius: 0,
+        pointRadius: xKey === "timestamp" ? 0 : 3,
         pointHoverRadius: 5
     }];
 
@@ -94,6 +95,7 @@ function createChart(canvasId, rows, settings) {
             scales: {
                 x: {
                     type: "linear",
+                    title: { display: xKey !== "timestamp", text: axisLabel(xKey) },
                     ticks: {
                         callback: val => xKey === "timestamp" ? formatTimestamp(val, "seconds") : val
                     }
@@ -102,14 +104,17 @@ function createChart(canvasId, rows, settings) {
             }
         }
     });
+    chartRegistry[canvasId].xKey = xKey;
+    chartRegistry[canvasId].yKey = yKey;
     return chartRegistry[canvasId];
 }
 
 function appendPoint(canvasId, row, maxPoints) {
     const chart = chartRegistry[canvasId];
     if (!chart) return;
-    const x = new Date(row.timestamp).getTime();
-    const yKey = COLUMNS.find(c => c.label === chart.data.datasets[0].label)?.key || "P1";
+    const xKey = chart.xKey || "timestamp";
+    const yKey = chart.yKey || "P1";
+    const x = xKey === "timestamp" ? new Date(row.timestamp).getTime() : Number(row[xKey]);
     const val = Number(row[yKey]);
     if (!Number.isFinite(x) || !Number.isFinite(val)) return;
 
@@ -118,7 +123,7 @@ function appendPoint(canvasId, row, maxPoints) {
     if (maxPoints && data.length > maxPoints) data.shift();
 
     const overlay = chart.data.datasets[1];
-    if (overlay && overlay.overlayKey) {
+    if (overlay && overlay.overlayKey && xKey === "timestamp") {
         const ov = Number(row[overlay.overlayKey]);
         if (Number.isFinite(ov)) {
             overlay.data.push({ x, y: ov });
