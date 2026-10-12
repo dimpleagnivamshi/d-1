@@ -5,7 +5,9 @@
    - RPM      : 905 (minimum operating speed) .. 2395 (max)
 
    "dp"   mode : hold a constant differential pressure (bar). RPM climbs until dP
-                 reaches the setpoint, then HOLDS (no overshoot).
+                 reaches the setpoint (ramp matched to the report), then RPM and dP are
+                 FIXED at one value each and stay flat (no overshoot).
+                 P1 and P2 still vary slowly.
    "flow" mode : hold a constant flow (L/min). Each flow is a FIXED operating
                  point: RPM and dP go to one fixed value and stay flat.
                  P1 and P2 still vary slowly. */
@@ -58,6 +60,7 @@ const SLEW_UP = 25;     // max RPM rise per second
 const SLEW_DOWN = 30;   // max RPM fall per second
 const TAU_DP = 6;       // s, dP lag behind RPM
 const TAU_P2 = 8;       // s, P2 lag
+const DP_FINE_ZONE = 0.02;   // bar, within this of the target dP the RPM closes in at a steady rate
 const FLOW_MIN_STEP = 6;     // RPM/s, minimum speed when closing in on a flow's fixed RPM
 const P2_DRIFT_MAX = 0.04;   // bar, slow wander of P2 (P1 follows because P1 = P2 + dP)
 
@@ -93,11 +96,12 @@ class PumpModel {
     /* advance one second under control = { mode, constDp, constFlow } */
     step(control, dt = 1) {
         const flowMode = control.mode === "flow";
-        let dpSetpoint, targetRpm;
+        let dpSetpoint, targetRpm, targetDp;
 
         if (flowMode) {
             targetRpm = clamp(flowToRpm(Number(control.constFlow)), RPM_MIN, RPM_MAX);
             dpSetpoint = K_DP * targetRpm * targetRpm;
+            targetDp = dpSetpoint;
             // ramp to the fixed operating point, then hold it exactly
             const err = targetRpm - this.rpm;
             let cmd = clamp(KN * err / RPM_RANGE, -SLEW_DOWN, SLEW_UP);
@@ -107,23 +111,34 @@ class PumpModel {
             if (Math.abs(targetRpm - this.rpm) < 0.01) this.rpm = targetRpm;
         } else {
             dpSetpoint = Number(control.constDp);
-            // RPM rises while dP is below the setpoint, stops (holds) at the setpoint
-            const cmd = clamp(KN * (dpSetpoint - this.dp) / DP_RANGE, -SLEW_DOWN, SLEW_UP);
-            this.rpm = clamp(this.rpm + cmd * dt, RPM_MIN, RPM_MAX);
+            // the fixed operating point for this dP: RPM = sqrt(dP / K), within the pump's speed range
+            // (below ~0.287 bar the pump sits at its minimum speed, as in the report's 0 bar data)
+            targetRpm = clamp(Math.sqrt(Math.max(dpSetpoint, 0) / K_DP), RPM_MIN, RPM_MAX);
+            targetDp = K_DP * targetRpm * targetRpm;
+            if (Math.abs(targetDp - this.dp) >= DP_FINE_ZONE) {
+                // far from the setpoint: RPM climbs/falls while dP is off the setpoint (matches the report)
+                const cmd = clamp(KN * (dpSetpoint - this.dp) / DP_RANGE, -SLEW_DOWN, SLEW_UP);
+                this.rpm = clamp(this.rpm + cmd * dt, RPM_MIN, RPM_MAX);
+            } else {
+                // dP has (almost) reached the setpoint: close in on the fixed RPM, then hold it exactly
+                const err = targetRpm - this.rpm;
+                let cmd = clamp(KN * err / RPM_RANGE, -SLEW_DOWN, SLEW_UP);
+                if (Math.abs(cmd) < FLOW_MIN_STEP) cmd = Math.sign(err) * Math.min(FLOW_MIN_STEP, Math.abs(err) / dt);
+                this.rpm = clamp(this.rpm + cmd * dt, RPM_MIN, RPM_MAX);
+                if (Math.abs(targetRpm - this.rpm) < 0.01) this.rpm = targetRpm;
+            }
         }
 
         this.dp += (K_DP * this.rpm * this.rpm - this.dp) * (1 - Math.exp(-dt / TAU_DP));
-        if (flowMode && this.rpm === targetRpm && Math.abs(this.dp - dpSetpoint) < 0.0005) this.dp = dpSetpoint;
+        if (this.rpm === targetRpm && Math.abs(this.dp - targetDp) < 0.0005) this.dp = targetDp;
 
         // P2 follows RPM and also wanders slowly (bounded); P1 = P2 + dP follows it
         this.drift = clamp(this.drift * 0.98 + gauss() * 0.004, -P2_DRIFT_MAX, P2_DRIFT_MAX);
         this.p2 += (p2Target(this.rpm) + this.drift - this.p2) * (1 - Math.exp(-dt / TAU_P2));
 
-        // flow mode: RPM and dP are perfectly flat; dP mode: small sensor noise as in the report
-        const rpmOut = flowMode
-            ? Math.round(this.rpm)
-            : Math.round(clamp(this.rpm + gauss() * 2.5, RPM_MIN - 5, RPM_MAX));
-        const dpOut = flowMode ? this.dp : Math.max(0, this.dp + gauss() * 0.004);
+        // RPM and dP are perfectly flat once held (both modes); only P1 and P2 vary
+        const rpmOut = Math.round(this.rpm);
+        const dpOut = this.dp;
         const p2Out = this.p2 + gauss() * 0.002;
         const p1Out = p2Out + dpOut;
         const r3 = v => Math.round(v * 1000) / 1000;
