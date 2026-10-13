@@ -168,7 +168,9 @@ class PumpModel {
             dP_SetpointDiff: r3(r3(dpOut) - r3(dpSetpoint)),
             TCS_dP_P1_P2: r3(dpSetpoint),
             ConstDP: Number(control.constDp),
-            ConstFlow: Number(control.constFlow),
+            // the Const Flow setpoint is only reported while Const Flow mode is active
+            // (in Const dP mode it is left out, so an old typed value is not drawn as a flat line)
+            ...(flowMode ? { ConstFlow: Number(control.constFlow) } : {}),
             ControlMode: flowMode ? "Const Flow" : "Const dP"
         };
     }
