@@ -7,9 +7,9 @@
    "dp"   mode : hold a constant differential pressure (bar). RPM climbs until dP
                  reaches the setpoint (ramp matched to the report), then RPM and dP are
                  FIXED at one value each and stay flat (no overshoot).
-                 P1 and P2 still vary slowly.
+                 P1, P2 and FLOW still vary.
    "flow" mode : hold a constant flow (L/min). Each flow is a FIXED operating
-                 point: RPM and dP go to one fixed value and stay flat.
+                 point: RPM, dP and FLOW go to one fixed value and stay flat.
                  P1 and P2 still vary slowly. */
 
 const K_DP = 3.5e-7;
@@ -63,6 +63,9 @@ const TAU_P2 = 8;       // s, P2 lag
 const DP_FINE_ZONE = 0.02;   // bar, within this of the target dP the RPM closes in at a steady rate
 const FLOW_MIN_STEP = 6;     // RPM/s, minimum speed when closing in on a flow's fixed RPM
 const P2_DRIFT_MAX = 0.04;   // bar, slow wander of P2 (P1 follows because P1 = P2 + dP)
+const FLOW_DRIFT_MAX = 60;   // L/min, slow wander of Flow in Const dP mode
+const FLOW_DRIFT_STEP = 6;   // L/min, random push per second on that wander
+const FLOW_NOISE = 4;        // L/min, per-reading sensor noise on Flow (Const dP mode only)
 
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 function gauss() {
@@ -81,6 +84,7 @@ class PumpModel {
         this.dp = K_DP * this.rpm * this.rpm;
         this.p2 = p2Target(this.rpm);
         this.drift = 0;
+        this.flowOffset = 0;
     }
 
     /* continue from the last stored reading (used on failover / resume) */
@@ -91,6 +95,7 @@ class PumpModel {
         this.dp = Number.isFinite(dp) ? dp : K_DP * this.rpm * this.rpm;
         this.p2 = Number.isFinite(p2) ? p2 : p2Target(this.rpm);
         this.drift = 0;
+        this.flowOffset = 0;
     }
 
     /* advance one second under control = { mode, constDp, constFlow } */
@@ -143,12 +148,23 @@ class PumpModel {
         const p1Out = p2Out + dpOut;
         const r3 = v => Math.round(v * 1000) / 1000;
 
+        // Flow: Const Flow mode -> perfectly stable (exactly the flow for the locked RPM).
+        //       Const dP mode   -> varies (slow wander + noise) while RPM and dP stay fixed.
+        if (flowMode) {
+            this.flowOffset *= 0.8;                       // fade out any wander left from dP mode
+            if (Math.abs(this.flowOffset) < 0.05) this.flowOffset = 0;
+        } else {
+            this.flowOffset = clamp(this.flowOffset * 0.97 + gauss() * FLOW_DRIFT_STEP, -FLOW_DRIFT_MAX, FLOW_DRIFT_MAX);
+        }
+        const flowNoise = flowMode ? 0 : gauss() * FLOW_NOISE;
+        const flowOut = Math.max(0, rpmToFlow(this.rpm) + this.flowOffset + flowNoise);
+
         return {
             P1: r3(p1Out),
             P2: r3(p2Out),
             dP: r3(dpOut),
             RPM: rpmOut,
-            Flow: Math.round(rpmToFlow(this.rpm) * 10) / 10,
+            Flow: Math.round(flowOut * 10) / 10,
             dP_SetpointDiff: r3(r3(dpOut) - r3(dpSetpoint)),
             TCS_dP_P1_P2: r3(dpSetpoint),
             ConstDP: Number(control.constDp),
