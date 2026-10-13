@@ -1,29 +1,30 @@
-/* Device 2 (Failover) dashboard.
-   Shows IDLE while Device 1 is healthy, ACTIVE when Device 2 has taken over.
-   Charts load history from the backend (Neon) and update live over SSE. */
+/* Device 1 (Master) dashboard.
+   Loads history from the backend (Neon) and updates live over SSE.
+   Also holds the "Interrupt Device 1" button, whose state follows the SERVER. */
 const PLOT_MAX_POINTS = 100;
-const STORAGE_KEY = "dashboard_2_charts_v4";
+const STORAGE_KEY = "dashboard_charts_v4";
 
 const DEFAULT_CHARTS = [
-    { id: "c1", title: "P1 vs Time", x: "timestamp", y: "P1", color: "#16a34a", timeFormat: "seconds" },
-    { id: "c2", title: "P2 vs Time", x: "timestamp", y: "P2", color: "#2563eb", timeFormat: "seconds" },
+    { id: "c1", title: "P1 vs Time", x: "timestamp", y: "P1", color: "#2563eb", timeFormat: "seconds" },
+    { id: "c2", title: "P2 vs Time", x: "timestamp", y: "P2", color: "#16a34a", timeFormat: "seconds" },
     { id: "c3", title: "dP vs Time (dashed = dP setpoint)", x: "timestamp", y: "dP", color: "#dc2626", timeFormat: "seconds", overlay: "TCS_dP_P1_P2" },
     { id: "c4", title: "RPM vs Time", x: "timestamp", y: "RPM", color: "#9333ea", timeFormat: "seconds" },
     { id: "c5", title: "Flow vs Time", x: "timestamp", y: "Flow", color: "#0891b2", timeFormat: "seconds" }
 ];
 
 const COLOR_PALETTE = [
-    "#16a34a", "#2563eb", "#dc2626", "#9333ea",
+    "#2563eb", "#16a34a", "#dc2626", "#9333ea",
     "#ea580c", "#0891b2", "#db2777", "#65a30d"
 ];
 
 let dashboardCharts = loadLayout();
 let dragSourceId = null;
+let d1_interrupted = false;
 
 /* Only the ACTIVE device's page plots live. When this page becomes active it
-   reloads the last points of the shared series, so it continues where
-   Device 1 left off. */
-const MY_DEVICE = "Device 2";
+   reloads the last points of the shared series, so it continues where the
+   other device left off. */
+const MY_DEVICE = "Device 1";
 function isMine(row) {
     return String(row.activeDevice || "").startsWith(MY_DEVICE);
 }
@@ -112,16 +113,40 @@ function fillColumnSelect(selectId, opts) {
 }
 
 /* =====================================================
-   PERSISTENCE (localStorage) - layout only
+   PERSISTENCE (localStorage) - layout only, not the data
    ===================================================== */
+
+/* Saved graphs that plot the "Const Flow" setpoint are switched to the real Flow signal,
+   and any duplicate Flow graph that results from that is dropped. */
+function migrateLayout(list) {
+    const seen = {};
+    return list.map(function (c) {
+        if (c.y !== "ConstFlow" && c.x !== "ConstFlow") return c;
+        const x = c.x === "ConstFlow" ? "Flow" : c.x;
+        const y = c.y === "ConstFlow" ? "Flow" : c.y;
+        return Object.assign({}, c, {
+            x: x,
+            y: y,
+            color: "#0891b2",
+            title: y + " vs " + (x === "timestamp" ? "Time" : axisLabel(x))
+        });
+    }).filter(function (c) {
+        const k = c.x + "|" + c.y;
+        if (seen[k]) return false;
+        seen[k] = true;
+        return true;
+    });
+}
 
 function loadLayout() {
     try {
         const raw = localStorage.getItem(STORAGE_KEY);
         if (!raw) return DEFAULT_CHARTS.slice();
         const parsed = JSON.parse(raw);
-        return Array.isArray(parsed) && parsed.length > 0 ? parsed : DEFAULT_CHARTS.slice();
+        if (Array.isArray(parsed) && parsed.length > 0) return migrateLayout(parsed);
+        return DEFAULT_CHARTS.slice();
     } catch (error) {
+        console.error("Could not read saved dashboard layout", error);
         return DEFAULT_CHARTS.slice();
     }
 }
@@ -149,11 +174,13 @@ function newChartId() {
 async function renderDashboard() {
     const container = document.getElementById("chartGrid");
     if (!container) return;
+
     container.innerHTML = "";
 
     dashboardCharts.forEach(function (cfg) {
         container.appendChild(buildCard(cfg));
     });
+
     container.appendChild(buildAddCard());
 
     await refreshCharts();
@@ -200,6 +227,7 @@ function buildCard(cfg) {
     toolbar.appendChild(handle);
     toolbar.appendChild(title);
 
+    /* PRECISION CONTROL - only meaningful for timestamp X-axis */
     if (cfg.x === "timestamp") {
         const precisionRow = document.createElement("div");
         precisionRow.className = "card-precision-row";
@@ -233,6 +261,7 @@ function buildCard(cfg) {
 
     card.appendChild(toolbar);
     card.appendChild(canvas);
+
     return card;
 }
 
@@ -317,7 +346,7 @@ function openAddForm(card) {
 
         dashboardCharts.push({
             id: newChartId(),
-            title: axisLabel(y) + " vs " + axisLabel(x),
+            title: axisLabel(y) + " vs " + (x === "timestamp" ? "Time" : axisLabel(x)),
             x: x,
             y: y,
             color: nextColor(),
@@ -388,24 +417,54 @@ function onDragEnd() {
 }
 
 /* =====================================================
-   LIVE STATUS - IDLE / ACTIVE
+   DEVICE 1 INTERRUPT BUTTON - state comes from the server
+   ===================================================== */
+
+function renderInterruptButton() {
+    const btn = document.getElementById("btn-interrupt-d1");
+    if (!btn) return;
+    btn.style.background = d1_interrupted ? "#dc2626" : "#ea580c";
+    btn.innerText = d1_interrupted
+        ? "Resume Device 1 (Currently Interrupted)"
+        : "Interrupt Device 1 (Master)";
+}
+
+async function syncInterruptButton() {
+    try {
+        const s = await getFeedStatus();
+        d1_interrupted = !s.device1Active;
+        renderInterruptButton();
+    } catch (e) {
+        console.error("Could not sync interrupt button:", e);
+    }
+}
+
+async function toggleInterrupt(device) {
+    if (device !== "d1") return;
+    try {
+        const res = await fetch("/api/device1/interrupt", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ interrupt: !d1_interrupted })
+        });
+        const result = await res.json();
+        d1_interrupted = Boolean(result.interrupted); // trust the server, not a local guess
+        renderInterruptButton();
+    } catch (err) {
+        console.error("Failed to toggle interrupt:", err);
+    }
+}
+
+/* =====================================================
+   LIVE FEED
    ===================================================== */
 
 function setLiveStatus(text, isLive) {
-    const status = document.getElementById("liveStatus");
+    const status = document.getElementById("liveStatus") || document.getElementById("status");
     if (status) {
         status.textContent = text;
         status.classList.toggle("live-on", isLive === true);
     }
-}
-
-function showRole(device1Active, count) {
-    setLiveStatus(
-        device1Active
-            ? "IDLE \u2014 Device 1 is running (" + count + " readings)"
-            : "ACTIVE \u2014 Device 1 is down, Device 2 is producing data (" + count + " readings)",
-        !device1Active
-    );
 }
 
 async function handleTick(newRow, totalCount) {
@@ -416,7 +475,7 @@ async function handleTick(newRow, totalCount) {
 
     if (isMine(newRow)) {
         if (!isPlotting) {
-            // just took over: reload the shared history (Device 1's last points), then continue
+            // just became active: reload the shared history, then continue from it
             isPlotting = true;
             rebuilding = true;
             try { await refreshCharts(); } finally { rebuilding = false; }
@@ -424,28 +483,29 @@ async function handleTick(newRow, totalCount) {
             pendingRows = [];
         }
         plotRow(newRow);
-        showRole(false, totalCount);   // ACTIVE
+        setLiveStatus("Live \u2014 Device 1 producing data \u2014 " + (newRow.ControlMode || "") + " (" + totalCount + " readings)", true);
     } else {
-        isPlotting = false;            // chart stays frozen while Device 1 runs
-        showRole(true, totalCount);    // IDLE
+        isPlotting = false;   // chart stays frozen while Device 2 is active
+        setLiveStatus("Device 1 interrupted \u2014 Device 2 is producing data (" + totalCount + " readings)", false);
     }
 }
 
 async function initLiveControls() {
     const downloadBtn = document.getElementById("downloadLog");
 
-    async function refresh() {
-        try {
-            const s = await getFeedStatus();
-            showRole(s.device1Active, s.count);
-        } catch (error) {
-            setLiveStatus("Backend unavailable", false);
-        }
+    await syncInterruptButton();
+    initSetpointPanel();
+
+    try {
+        const status = await getFeedStatus();
+        setLiveStatus("Live \u2014 " + status.count + " readings logged", true);
+    } catch (error) {
+        console.error("Could not read backend status:", error);
+        setLiveStatus("Backend unavailable: " + error.message, false);
     }
 
-    await refresh();
-    // keeps the IDLE/ACTIVE label correct even when no ticks arrive
-    setInterval(refresh, 2000);
+    // keep the button correct even if another tab/device changes the state
+    setInterval(syncInterruptButton, 3000);
 
     if (downloadBtn) {
         downloadBtn.addEventListener("click", async function () {
@@ -454,6 +514,7 @@ async function initLiveControls() {
                 await exportLogToExcel();
             } catch (error) {
                 console.error("Excel export failed:", error);
+                setLiveStatus("Export failed: " + error.message, false);
             } finally {
                 downloadBtn.disabled = false;
             }
@@ -469,6 +530,66 @@ renderDashboard().then(function () {
     onRealtimeTick(handleTick);
     initLiveControls();
 }).catch(function (error) {
-    console.error("Dashboard 2 failed to load:", error);
+    console.error("Dashboard failed to load:", error);
     setLiveStatus("Dashboard load failed: " + error.message, false);
 });
+
+/* =====================================================
+   MANUAL SETPOINT PANEL (const dP / const flow)
+   ===================================================== */
+
+function setSetpointMessage(text, isError) {
+    const el = document.getElementById("spMsg");
+    if (!el) return;
+    el.textContent = text;
+    el.style.color = isError ? "#dc2626" : "#16a34a";
+}
+
+function updateSetpointInputs() {
+    const mode = document.getElementById("spMode").value;
+    document.getElementById("spDpWrap").style.opacity = mode === "dp" ? "1" : "0.45";
+    document.getElementById("spFlowWrap").style.opacity = mode === "flow" ? "1" : "0.45";
+}
+
+async function initSetpointPanel() {
+    const modeEl = document.getElementById("spMode");
+    const dpEl = document.getElementById("spDp");
+    const flowEl = document.getElementById("spFlow");
+    const applyBtn = document.getElementById("btnApplySetpoint");
+    if (!modeEl || !dpEl || !flowEl || !applyBtn) return;
+
+    try {
+        const sp = await apiRequest("/api/setpoint");
+        modeEl.value = sp.mode;
+        dpEl.value = sp.constDp;
+        flowEl.value = sp.constFlow;
+        setSetpointMessage("Active: " + (sp.mode === "dp" ? "Const dP " + sp.constDp + " bar" : "Const Flow " + sp.constFlow + " L/min"), false);
+    } catch (e) {
+        setSetpointMessage("Could not load setpoint: " + e.message, true);
+    }
+
+    modeEl.addEventListener("change", updateSetpointInputs);
+    updateSetpointInputs();
+
+    applyBtn.addEventListener("click", async function () {
+        applyBtn.disabled = true;
+        try {
+            const res = await fetch("/api/setpoint", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    mode: modeEl.value,
+                    constDp: Number(dpEl.value),
+                    constFlow: Number(flowEl.value)
+                })
+            });
+            const result = await res.json();
+            if (!res.ok) throw new Error(result.error || "Request failed");
+            setSetpointMessage("Applied: " + (result.mode === "dp" ? "Const dP " + result.constDp + " bar" : "Const Flow " + result.constFlow + " L/min") + " \u2014 RPM is adjusting", false);
+        } catch (e) {
+            setSetpointMessage(e.message, true);
+        } finally {
+            applyBtn.disabled = false;
+        }
+    });
+}
