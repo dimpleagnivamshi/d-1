@@ -63,9 +63,21 @@ const TAU_P2 = 8;       // s, P2 lag
 const DP_FINE_ZONE = 0.02;   // bar, within this of the target dP the RPM closes in at a steady rate
 const FLOW_MIN_STEP = 6;     // RPM/s, minimum speed when closing in on a flow's fixed RPM
 const P2_DRIFT_MAX = 0.04;   // bar, slow wander of P2 (P1 follows because P1 = P2 + dP)
-const FLOW_DRIFT_MAX = 60;   // L/min, slow wander of Flow in Const dP mode
-const FLOW_DRIFT_STEP = 6;   // L/min, random push per second on that wander
-const FLOW_NOISE = 4;        // L/min, per-reading sensor noise on Flow (Const dP mode only)
+
+/* Flow sensor behaviour in Const dP mode - measured from to_be_shared.xlsx
+   (Log Data rows 102-1178: Automatic Mode, dP setpoint 2 bar, measured dP 2.00 +/- 0.02).
+   - Mean flow at 2 bar is 1755 L/min; during the start-up ramp flow follows dP as ~ dP^0.65
+   - The sensor only refreshes about every 9.7 s and holds its value in between
+   - Values are in steps of 1.2 L/min (sensor resolution)
+   - Around the mean: a slow wander (about +/-6.7 L/min, time constant ~6 min)
+     plus a fresh random jitter of about +/-4.1 L/min at every refresh */
+const FLOW_AT_2BAR = 1755;     // L/min, mean flow when dP = 2 bar
+const FLOW_DP_EXP = 0.65;      // flow = FLOW_AT_2BAR * (dP / 2) ^ 0.65
+const FLOW_STEP = 1.2;         // L/min, sensor resolution
+const FLOW_REFRESH_S = 9.7;    // s, the sensor value is refreshed this often
+const FLOW_SLOW_SIGMA = 6.7;   // L/min, size of the slow wander
+const FLOW_SLOW_TAU = 360;     // s, how slowly that wander changes
+const FLOW_JITTER = 4.1;       // L/min, random jitter added at every refresh
 
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 function gauss() {
@@ -84,7 +96,11 @@ class PumpModel {
         this.dp = K_DP * this.rpm * this.rpm;
         this.p2 = p2Target(this.rpm);
         this.drift = 0;
-        this.flowOffset = 0;
+        this.flowOffset = 0;      // used to fade Flow out when leaving Const dP mode
+        this.flowSlow = 0;        // slow wander of the flow sensor (Const dP mode)
+        this.flowReading = null;  // value the flow sensor is currently holding
+        this.flowAcc = FLOW_REFRESH_S;   // seconds since the sensor last refreshed
+        this.lastMode = null;
     }
 
     /* continue from the last stored reading (used on failover / resume) */
@@ -96,6 +112,10 @@ class PumpModel {
         this.p2 = Number.isFinite(p2) ? p2 : p2Target(this.rpm);
         this.drift = 0;
         this.flowOffset = 0;
+        this.flowSlow = 0;
+        this.flowReading = null;
+        this.flowAcc = FLOW_REFRESH_S;
+        this.lastMode = null;
     }
 
     /* advance one second under control = { mode, constDp, constFlow } */
@@ -148,16 +168,33 @@ class PumpModel {
         const p1Out = p2Out + dpOut;
         const r3 = v => Math.round(v * 1000) / 1000;
 
-        // Flow: Const Flow mode -> perfectly stable (exactly the flow for the locked RPM).
-        //       Const dP mode   -> varies (slow wander + noise) while RPM and dP stay fixed.
+        // Flow
+        //  Const Flow mode -> perfectly stable: exactly the flow for the locked RPM.
+        //  Const dP mode   -> behaves like the real flow sensor in the log: holds a value,
+        //                     refreshes every ~9.7 s, steps of 1.2 L/min, slow wander + jitter.
+        let flowOut;
         if (flowMode) {
-            this.flowOffset *= 0.8;                       // fade out any wander left from dP mode
+            this.flowOffset *= 0.8;                       // fade out whatever Const dP mode left
             if (Math.abs(this.flowOffset) < 0.05) this.flowOffset = 0;
+            flowOut = Math.max(0, rpmToFlow(this.rpm) + this.flowOffset);
         } else {
-            this.flowOffset = clamp(this.flowOffset * 0.97 + gauss() * FLOW_DRIFT_STEP, -FLOW_DRIFT_MAX, FLOW_DRIFT_MAX);
+            if (this.lastMode !== "dp") this.flowAcc = FLOW_REFRESH_S;     // refresh right away on entering
+            const base = FLOW_AT_2BAR * Math.pow(Math.max(this.dp, 0) / 2, FLOW_DP_EXP);
+            const scale = base / FLOW_AT_2BAR;            // wander and jitter shrink with the flow
+            // slow wander (exact Ornstein-Uhlenbeck step)
+            const k = Math.exp(-dt / FLOW_SLOW_TAU);
+            this.flowSlow = this.flowSlow * k + FLOW_SLOW_SIGMA * Math.sqrt(1 - k * k) * gauss();
+            // the sensor refreshes every FLOW_REFRESH_S seconds, otherwise it keeps its last value
+            this.flowAcc += dt;
+            if (this.flowReading === null || this.flowAcc >= FLOW_REFRESH_S) {
+                this.flowAcc = this.flowReading === null ? 0 : this.flowAcc - FLOW_REFRESH_S;
+                const trueFlow = base + scale * (this.flowSlow + FLOW_JITTER * gauss());
+                this.flowReading = Math.max(0, Math.round(trueFlow / FLOW_STEP) * FLOW_STEP);
+            }
+            flowOut = this.flowReading;
+            this.flowOffset = flowOut - rpmToFlow(this.rpm);   // so a switch to Const Flow fades smoothly
         }
-        const flowNoise = flowMode ? 0 : gauss() * FLOW_NOISE;
-        const flowOut = Math.max(0, rpmToFlow(this.rpm) + this.flowOffset + flowNoise);
+        this.lastMode = flowMode ? "flow" : "dp";
 
         return {
             P1: r3(p1Out),
