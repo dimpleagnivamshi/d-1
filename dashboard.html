@@ -12,11 +12,41 @@
     <script src="https://cdn.jsdelivr.net/npm/xlsx/dist/xlsx.full.min.js"></script>
 
     <link rel="stylesheet" href="style.css">
+
+    <style>
+        [hidden] { display: none !important; }
+
+        /* Graphs / Logs switch */
+        .view-tabs { display: flex; gap: 8px; margin: 0 0 16px; }
+        .view-tab { padding: 9px 22px; border: 1px solid #e2e8f0; background: #f8fafc; border-radius: 8px;
+                    cursor: pointer; font-weight: 600; font-size: 0.95rem; color: #334155; }
+        .view-tab:hover { background: #eef2f7; }
+        .view-tab.active { background: #2563eb; border-color: #2563eb; color: #fff; }
+
+        /* Logs table */
+        .log-toolbar { display: flex; align-items: center; gap: 16px; margin-bottom: 10px; flex-wrap: wrap; }
+        .log-toolbar select { padding: 5px 8px; }
+        .log-count { color: #64748b; font-size: 0.9rem; }
+        .log-table-wrap { max-height: 70vh; overflow: auto; border: 1px solid #e2e8f0; border-radius: 8px; background: #fff; }
+        .log-table { border-collapse: collapse; width: 100%; font-size: 0.9rem; white-space: nowrap; }
+        .log-table th { position: sticky; top: 0; background: #f1f5f9; text-align: left; padding: 9px 12px;
+                        border-bottom: 1px solid #e2e8f0; z-index: 1; }
+        .log-table td { padding: 6px 12px; border-bottom: 1px solid #f1f5f9; }
+        .log-table th.num, .log-table td.num { text-align: right; font-variant-numeric: tabular-nums; }
+        .log-table tbody tr:nth-child(even) { background: #f8fafc; }
+        .log-table td.dim { color: #94a3b8; }
+    </style>
 </head>
 
 <body>
 
     <div id="pageHeader"></div>
+
+    <!-- VIEW SWITCH: Graphs / Logs -->
+    <div class="view-tabs">
+        <button id="tabGraphs" class="view-tab active" type="button">Graphs</button>
+        <button id="tabLogs" class="view-tab" type="button">Logs</button>
+    </div>
 
     <!-- LIVE FEED CONTROLS -->
     <div class="controls live-controls">
@@ -49,8 +79,32 @@
         <span id="spMsg" style="font-weight: bold;"></span>
     </div>
 
-    <!-- Charts are inserted here by dashboard.js -->
-    <div id="chartGrid" class="dashboard-grid"></div>
+    <!-- GRAPHS VIEW -->
+    <div id="viewGraphs">
+        <!-- Charts are inserted here by dashboard.js -->
+        <div id="chartGrid" class="dashboard-grid"></div>
+    </div>
+
+    <!-- LOGS VIEW (table, newest reading on top, updates live) -->
+    <div id="viewLogs" hidden>
+        <div class="log-toolbar">
+            <label>Rows to show
+                <select id="logLimit">
+                    <option value="50">50</option>
+                    <option value="100" selected>100</option>
+                    <option value="200">200</option>
+                    <option value="500">500</option>
+                </select>
+            </label>
+            <span id="logCount" class="log-count"></span>
+        </div>
+        <div class="log-table-wrap">
+            <table class="log-table">
+                <thead id="logHead"></thead>
+                <tbody id="logBody"></tbody>
+            </table>
+        </div>
+    </div>
 
     <script src="pages.js"></script>
     <script src="nav.js"></script>

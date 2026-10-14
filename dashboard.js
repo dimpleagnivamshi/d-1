@@ -116,12 +116,34 @@ function fillColumnSelect(selectId, opts) {
    PERSISTENCE (localStorage) - layout only, not the data
    ===================================================== */
 
+/* Saved graphs that plot the "Const Flow" setpoint are switched to the real Flow signal,
+   and any duplicate Flow graph that results from that is dropped. */
+function migrateLayout(list) {
+    const seen = {};
+    return list.map(function (c) {
+        if (c.y !== "ConstFlow" && c.x !== "ConstFlow") return c;
+        const x = c.x === "ConstFlow" ? "Flow" : c.x;
+        const y = c.y === "ConstFlow" ? "Flow" : c.y;
+        return Object.assign({}, c, {
+            x: x,
+            y: y,
+            color: "#0891b2",
+            title: y + " vs " + (x === "timestamp" ? "Time" : axisLabel(x))
+        });
+    }).filter(function (c) {
+        const k = c.x + "|" + c.y;
+        if (seen[k]) return false;
+        seen[k] = true;
+        return true;
+    });
+}
+
 function loadLayout() {
     try {
         const raw = localStorage.getItem(STORAGE_KEY);
         if (!raw) return DEFAULT_CHARTS.slice();
         const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+        if (Array.isArray(parsed) && parsed.length > 0) return migrateLayout(parsed);
         return DEFAULT_CHARTS.slice();
     } catch (error) {
         console.error("Could not read saved dashboard layout", error);
@@ -324,7 +346,7 @@ function openAddForm(card) {
 
         dashboardCharts.push({
             id: newChartId(),
-            title: axisLabel(y) + " vs " + axisLabel(x),
+            title: axisLabel(y) + " vs " + (x === "timestamp" ? "Time" : axisLabel(x)),
             x: x,
             y: y,
             color: nextColor(),
@@ -446,6 +468,7 @@ function setLiveStatus(text, isLive) {
 }
 
 async function handleTick(newRow, totalCount) {
+    appendLogRow(newRow);   // the Logs table shows every reading, whichever device produced it
     if (rebuilding) {
         if (isMine(newRow)) pendingRows.push(newRow);
         return;
@@ -571,3 +594,146 @@ async function initSetpointPanel() {
         }
     });
 }
+
+/* =====================================================
+   GRAPHS / LOGS VIEW SWITCH + LOGS TABLE
+   ===================================================== */
+
+const LOG_FETCH_MAX = 500;          // newest readings kept in the table (the "Rows to show" box picks how many are drawn)
+
+const LOG_COLUMNS = [
+    { key: "id", label: "#", dec: 0 },
+    { key: "timestamp", label: "Timestamp", time: true },
+    { key: "P1", label: "P1", dec: 3 },
+    { key: "P2", label: "P2", dec: 3 },
+    { key: "dP", label: "dP", dec: 3 },
+    { key: "RPM", label: "RPM", dec: 0 },
+    { key: "Flow", label: "Flow", dec: 1 },
+    { key: "dP_SetpointDiff", label: "dP Setpoint Difference", dec: 3 },
+    { key: "TCS_dP_P1_P2", label: "TCS dP P1 P2", dec: 3 },
+    { key: "ConstDP", label: "Const dP" },
+    { key: "ConstFlow", label: "Const Flow" },
+    { key: "ControlMode", label: "Mode", text: true },
+    { key: "activeDevice", label: "Device", text: true }
+];
+
+let logLimit = 100;
+let logRows = [];       // newest first
+let lastLogId = 0;
+
+function formatLogCell(col, row) {
+    const v = row[col.key];
+    if (v === undefined || v === null || v === "") return "\u2014";      // e.g. Const Flow is blank in Const dP mode
+    if (col.time) return formatByPrecision(v, "seconds");
+    if (col.text) return String(v);
+    const n = Number(v);
+    if (!Number.isFinite(n)) return String(v);
+    return col.dec === undefined ? String(n) : n.toFixed(col.dec);
+}
+
+function buildLogRowElement(row) {
+    const tr = document.createElement("tr");
+    LOG_COLUMNS.forEach(function (col) {
+        const td = document.createElement("td");
+        const text = formatLogCell(col, row);
+        td.textContent = text;
+        if (!col.text && !col.time) td.className = "num";
+        if (text === "\u2014") td.classList.add("dim");
+        tr.appendChild(td);
+    });
+    return tr;
+}
+
+function buildLogHeader() {
+    const head = document.getElementById("logHead");
+    if (!head) return;
+    const tr = document.createElement("tr");
+    LOG_COLUMNS.forEach(function (col) {
+        const th = document.createElement("th");
+        th.textContent = col.label;
+        if (!col.text && !col.time) th.className = "num";
+        tr.appendChild(th);
+    });
+    head.innerHTML = "";
+    head.appendChild(tr);
+}
+
+function updateLogCount() {
+    const el = document.getElementById("logCount");
+    if (!el) return;
+    el.textContent = "Showing " + Math.min(logRows.length, logLimit) + " of the last " + logRows.length + " readings \u2014 newest first";
+}
+
+function renderLogTable() {
+    const body = document.getElementById("logBody");
+    if (!body) return;
+    body.innerHTML = "";
+    const frag = document.createDocumentFragment();
+    logRows.slice(0, logLimit).forEach(function (row) {
+        frag.appendChild(buildLogRowElement(row));
+    });
+    body.appendChild(frag);
+    updateLogCount();
+}
+
+async function loadLogRows() {
+    const rows = await getLastLoggedRows(LOG_FETCH_MAX).catch(function () { return []; });   // oldest -> newest
+    const loadedLast = rows.length ? rows[rows.length - 1].id : 0;
+    // keep any reading that arrived live while the history was loading
+    const newer = logRows.filter(function (r) { return r.id > loadedLast; });
+    logRows = newer.concat(rows.slice().reverse());
+    lastLogId = Math.max(lastLogId, loadedLast);
+    renderLogTable();
+}
+
+function appendLogRow(row) {
+    if (!row || !(row.id > lastLogId)) return;
+    lastLogId = row.id;
+    logRows.unshift(row);
+    if (logRows.length > LOG_FETCH_MAX) logRows.pop();
+
+    const body = document.getElementById("logBody");
+    if (!body) return;
+    body.insertBefore(buildLogRowElement(row), body.firstChild);
+    while (body.rows.length > logLimit) body.deleteRow(body.rows.length - 1);
+    updateLogCount();
+}
+
+function showView(name) {
+    const logs = name === "logs";
+    document.getElementById("viewGraphs").hidden = logs;
+    document.getElementById("viewLogs").hidden = !logs;
+    document.getElementById("tabGraphs").classList.toggle("active", !logs);
+    document.getElementById("tabLogs").classList.toggle("active", logs);
+    if (location.hash !== "#" + name) history.replaceState(null, "", "#" + name);
+    // charts drawn while hidden have no size; fix that when they come back
+    if (!logs) Object.keys(chartRegistry).forEach(function (id) { chartRegistry[id].resize(); });
+}
+
+function initViewTabs() {
+    const tabGraphs = document.getElementById("tabGraphs");
+    const tabLogs = document.getElementById("tabLogs");
+    if (!tabGraphs || !tabLogs) return;
+    tabGraphs.addEventListener("click", function () { showView("graphs"); });
+    tabLogs.addEventListener("click", function () { showView("logs"); });
+    window.addEventListener("hashchange", function () {
+        showView(location.hash === "#logs" ? "logs" : "graphs");
+    });
+    showView(location.hash === "#logs" ? "logs" : "graphs");   // open straight on Logs with dashboard.html#logs
+}
+
+function initLogsView() {
+    buildLogHeader();
+    const limitEl = document.getElementById("logLimit");
+    if (limitEl) {
+        logLimit = Number(limitEl.value) || 100;
+        limitEl.addEventListener("change", function () {
+            logLimit = Number(limitEl.value) || 100;
+            renderLogTable();
+        });
+    }
+    loadLogRows();
+}
+
+initViewTabs();
+initLogsView();
