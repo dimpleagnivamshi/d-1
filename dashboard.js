@@ -17,6 +17,23 @@ const COLOR_PALETTE = [
     "#ea580c", "#0891b2", "#db2777", "#65a30d"
 ];
 
+/* ASSUMED limits, drawn as dotted lines on the Y axis until you set your own
+   (use the "Limits" button on a graph). They are not real alarm values. */
+const LIMIT_DEFAULTS = {
+    P1: { lower: 0.8, upper: 3.2 },                    // bar
+    P2: { lower: 0.9, upper: 1.2 },                    // bar
+    dP: { lower: 0.2, upper: 2.2 },                    // bar
+    RPM: { lower: 900, upper: 2400 },                  // pump range 905 - 2395
+    Flow: { lower: 400, upper: 2500 },                 // L/min
+    dP_SetpointDiff: { lower: -0.05, upper: 0.05 },    // bar
+    TCS_dP_P1_P2: { lower: 0, upper: 2.2 },            // bar
+    ConstDP: { lower: 0, upper: 2 },
+    ConstFlow: { lower: 0, upper: 2500 }
+};
+
+let modalEl = null;       // the open pop-up (graph table or limits), if any
+let modalState = null;    // { refresh() } so an open table keeps updating live
+
 let dashboardCharts = loadLayout();
 let dragSourceId = null;
 let d1_interrupted = false;
@@ -48,7 +65,9 @@ async function refreshCharts() {
             title: null,
             timeFormat: cfg.timeFormat || "seconds",
             aggregate: true,
-            overlay: cfg.overlay
+            overlay: cfg.overlay,
+            limits: getLimits(cfg),
+            fitData: cfg.fitData === true
         });
         if (cfg.x === "timestamp") {
             setChartPrecision("chart_" + cfg.id, cfg.timeFormat || "seconds");
@@ -56,6 +75,7 @@ async function refreshCharts() {
     });
 
     if (rows.length) lastPlottedId = rows[rows.length - 1].id;
+    if (modalState && modalState.refresh) modalState.refresh();
 }
 
 function plotRow(row) {
@@ -64,6 +84,7 @@ function plotRow(row) {
     dashboardCharts.forEach(function (cfg) {
         appendPoint("chart_" + cfg.id, row, PLOT_MAX_POINTS);
     });
+    if (modalState && modalState.refresh) modalState.refresh();
 }
 
 /* =====================================================
@@ -253,6 +274,12 @@ function buildCard(cfg) {
         precisionRow.appendChild(precisionSelect);
         toolbar.appendChild(precisionRow);
     }
+
+    const tools = document.createElement("div");
+    tools.className = "card-tools";
+    tools.appendChild(makeToolButton("Table", "Show the data of this graph as a table", function () { openTableModal(cfg); }));
+    tools.appendChild(makeToolButton("Limits", "Set the lower / upper limit lines", function () { openLimitsModal(cfg); }));
+    toolbar.appendChild(tools);
 
     toolbar.appendChild(removeBtn);
 
@@ -737,3 +764,314 @@ function initLogsView() {
 
 initViewTabs();
 initLogsView();
+
+/* =====================================================
+   LIMIT LINES + GRAPH TABLE (per graph)
+   ===================================================== */
+
+/* limits of one graph: its own saved values, else the assumed defaults. null = switched off. */
+function getLimits(cfg) {
+    const d = LIMIT_DEFAULTS[cfg.y] || {};
+    const lower = cfg.lower === undefined ? d.lower : cfg.lower;
+    const upper = cfg.upper === undefined ? d.upper : cfg.upper;
+    return {
+        lower: Number.isFinite(lower) ? lower : undefined,
+        upper: Number.isFinite(upper) ? upper : undefined
+    };
+}
+
+function makeToolButton(text, title, onClick) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "tool-btn";
+    btn.textContent = text;
+    btn.title = title;
+    btn.draggable = false;
+    btn.addEventListener("click", function (event) {
+        event.stopPropagation();
+        onClick();
+    });
+    return btn;
+}
+
+/* ---------- pop-up window ---------- */
+
+function onModalKey(event) {
+    if (event.key === "Escape") closeModal();
+}
+
+function closeModal() {
+    if (modalEl) modalEl.remove();
+    modalEl = null;
+    modalState = null;
+    document.removeEventListener("keydown", onModalKey);
+}
+
+function openModal(title, bodyEl, state) {
+    closeModal();
+    const overlay = document.createElement("div");
+    overlay.className = "modal-overlay";
+    overlay.addEventListener("click", function (event) {
+        if (event.target === overlay) closeModal();
+    });
+
+    const box = document.createElement("div");
+    box.className = "modal-box";
+
+    const head = document.createElement("div");
+    head.className = "modal-head";
+    const h = document.createElement("h3");
+    h.textContent = title;
+    const x = document.createElement("button");
+    x.type = "button";
+    x.className = "modal-close";
+    x.textContent = "\u00D7";
+    x.title = "Close";
+    x.addEventListener("click", closeModal);
+    head.appendChild(h);
+    head.appendChild(x);
+
+    box.appendChild(head);
+    box.appendChild(bodyEl);
+    overlay.appendChild(box);
+    document.body.appendChild(overlay);
+
+    modalEl = overlay;
+    modalState = state || null;
+    document.addEventListener("keydown", onModalKey);
+}
+
+/* ---------- table of one graph ---------- */
+
+function decimalsFor(key) {
+    const col = LOG_COLUMNS.find(function (c) { return c.key === key; });
+    return col ? col.dec : undefined;
+}
+
+function formatGraphValue(key, v) {
+    const n = Number(v);
+    if (!Number.isFinite(n)) return "\u2014";
+    const dec = decimalsFor(key);
+    return dec === undefined ? String(n) : n.toFixed(dec);
+}
+
+/* the points currently plotted on the graph, newest first */
+function graphRowsFor(cfg) {
+    const chart = chartRegistry["chart_" + cfg.id];
+    if (!chart) return { rows: [], overlayKey: null };
+    const main = chart.data.datasets[0].data;
+    const second = chart.data.datasets[1];
+    const overlayKey = second && second.overlayKey ? second.overlayKey : null;
+    const overlayByX = new Map();
+    if (overlayKey) second.data.forEach(function (p) { overlayByX.set(p.x, p.y); });
+    const rows = main.map(function (p) { return { x: p.x, y: p.y, ov: overlayByX.get(p.x) }; });
+    return { rows: rows.reverse(), overlayKey: overlayKey };
+}
+
+function limitStatus(y, limits) {
+    if (Number.isFinite(limits.upper) && y > limits.upper) return "Above upper limit";
+    if (Number.isFinite(limits.lower) && y < limits.lower) return "Below lower limit";
+    return "OK";
+}
+
+/* header + body cells for the table and the CSV, built once */
+function buildGraphTable(cfg) {
+    const data = graphRowsFor(cfg);
+    const limits = getLimits(cfg);
+    const hasLimits = Number.isFinite(limits.lower) || Number.isFinite(limits.upper);
+    const head = [cfg.x === "timestamp" ? "Time" : axisLabel(cfg.x), axisLabel(cfg.y)];
+    if (data.overlayKey) head.push(axisLabel(data.overlayKey) + " (setpoint)");
+    if (hasLimits) head.push("Limit status");
+
+    const rows = data.rows.map(function (r) {
+        const cells = [
+            cfg.x === "timestamp" ? formatByPrecision(r.x, cfg.timeFormat || "seconds") : formatGraphValue(cfg.x, r.x),
+            formatGraphValue(cfg.y, r.y)
+        ];
+        if (data.overlayKey) cells.push(formatGraphValue(data.overlayKey, r.ov));
+        const status = hasLimits ? limitStatus(r.y, limits) : null;
+        if (hasLimits) cells.push(status);
+        return { cells: cells, bad: status !== null && status !== "OK" };
+    });
+    return { head: head, rows: rows, limits: limits };
+}
+
+function downloadGraphCsv(cfg) {
+    const t = buildGraphTable(cfg);
+    const esc = function (v) { return '"' + String(v).replace(/"/g, '""') + '"'; };
+    const lines = [t.head.map(esc).join(",")].concat(t.rows.map(function (r) { return r.cells.map(esc).join(","); }));
+    const blob = new Blob([lines.join("\r\n")], { type: "text/csv;charset=utf-8" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = (cfg.title || axisLabel(cfg.y) + " vs " + axisLabel(cfg.x)).replace(/[^\w\-]+/g, "_") + ".csv";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(function () { URL.revokeObjectURL(a.href); }, 1000);
+}
+
+function openTableModal(cfg) {
+    const body = document.createElement("div");
+    body.className = "modal-body";
+
+    const bar = document.createElement("div");
+    bar.className = "modal-bar";
+    const note = document.createElement("span");
+    note.className = "log-count";
+    const csvBtn = document.createElement("button");
+    csvBtn.type = "button";
+    csvBtn.className = "tool-btn";
+    csvBtn.textContent = "Download CSV";
+    csvBtn.addEventListener("click", function () { downloadGraphCsv(cfg); });
+    bar.appendChild(note);
+    bar.appendChild(csvBtn);
+
+    const wrap = document.createElement("div");
+    wrap.className = "log-table-wrap modal-table-wrap";
+    const table = document.createElement("table");
+    table.className = "log-table";
+    wrap.appendChild(table);
+
+    body.appendChild(bar);
+    body.appendChild(wrap);
+
+    function render() {
+        const t = buildGraphTable(cfg);
+        table.innerHTML = "";
+        const thead = document.createElement("thead");
+        const htr = document.createElement("tr");
+        t.head.forEach(function (label, i) {
+            const th = document.createElement("th");
+            th.textContent = label;
+            if (i > 0 && label !== "Limit status") th.className = "num";
+            htr.appendChild(th);
+        });
+        thead.appendChild(htr);
+        table.appendChild(thead);
+
+        const tbody = document.createElement("tbody");
+        const frag = document.createDocumentFragment();
+        t.rows.forEach(function (r) {
+            const tr = document.createElement("tr");
+            r.cells.forEach(function (text, i) {
+                const td = document.createElement("td");
+                td.textContent = text;
+                const isStatus = t.head[i] === "Limit status";
+                if (i > 0 && !isStatus) td.className = "num";
+                if (r.bad && (i === 1 || isStatus)) td.classList.add("out");
+                tr.appendChild(td);
+            });
+            frag.appendChild(tr);
+        });
+        tbody.appendChild(frag);
+        table.appendChild(tbody);
+
+        const lim = t.limits;
+        const limText = (Number.isFinite(lim.lower) || Number.isFinite(lim.upper))
+            ? " \u2014 limits: " + (Number.isFinite(lim.lower) ? lim.lower : "none") + " to " + (Number.isFinite(lim.upper) ? lim.upper : "none")
+            : "";
+        note.textContent = t.rows.length + " points on the graph, newest first" + limText;
+    }
+
+    render();
+    openModal((cfg.title || axisLabel(cfg.y) + " vs " + axisLabel(cfg.x)) + " \u2014 data table", body, { refresh: render });
+}
+
+/* ---------- choose the lower / upper limit ---------- */
+
+function openLimitsModal(cfg) {
+    const cur = getLimits(cfg);
+    const body = document.createElement("div");
+    body.className = "modal-body";
+
+    const info = document.createElement("p");
+    info.className = "log-count";
+    info.textContent = "Dotted lines on the Y axis (" + axisLabel(cfg.y) + "). Leave a box empty for no line. "
+        + "The starting values are assumed, so change them to your real limits.";
+    body.appendChild(info);
+
+    function field(labelText, value) {
+        const label = document.createElement("label");
+        label.className = "limit-field";
+        label.textContent = labelText;
+        const input = document.createElement("input");
+        input.type = "number";
+        input.step = "any";
+        input.value = Number.isFinite(value) ? value : "";
+        label.appendChild(input);
+        body.appendChild(label);
+        return input;
+    }
+    const upperInput = field("Upper limit", cur.upper);
+    const lowerInput = field("Lower limit", cur.lower);
+
+    const fitLabel = document.createElement("label");
+    fitLabel.className = "limit-check";
+    const fitInput = document.createElement("input");
+    fitInput.type = "checkbox";
+    fitInput.checked = cfg.fitData === true;
+    fitLabel.appendChild(fitInput);
+    fitLabel.appendChild(document.createTextNode(" Zoom the axis to the data (a limit line shows only when it is inside the view)"));
+    body.appendChild(fitLabel);
+
+    const msg = document.createElement("div");
+    msg.className = "limit-msg";
+    body.appendChild(msg);
+
+    const actions = document.createElement("div");
+    actions.className = "modal-actions";
+
+    function apply() {
+        setChartLimits("chart_" + cfg.id, getLimits(cfg), cfg.fitData === true);
+        saveLayout();
+        closeModal();
+    }
+
+    const save = document.createElement("button");
+    save.type = "button";
+    save.className = "btn-confirm";
+    save.textContent = "Save";
+    save.addEventListener("click", function () {
+        const parse = function (el) {
+            const t = el.value.trim();
+            if (t === "") return { ok: true, value: null };
+            const n = Number(t);
+            return Number.isFinite(n) ? { ok: true, value: n } : { ok: false };
+        };
+        const up = parse(upperInput);
+        const lo = parse(lowerInput);
+        if (!up.ok || !lo.ok) { msg.textContent = "Enter numbers only."; return; }
+        if (up.value !== null && lo.value !== null && lo.value >= up.value) {
+            msg.textContent = "The lower limit must be smaller than the upper limit.";
+            return;
+        }
+        cfg.upper = up.value;
+        cfg.lower = lo.value;
+        cfg.fitData = fitInput.checked;
+        apply();
+    });
+
+    const reset = document.createElement("button");
+    reset.type = "button";
+    reset.className = "btn-cancel";
+    reset.textContent = "Reset to assumed values";
+    reset.addEventListener("click", function () {
+        delete cfg.upper;
+        delete cfg.lower;
+        delete cfg.fitData;
+        apply();
+    });
+
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "btn-cancel";
+    cancel.textContent = "Cancel";
+    cancel.addEventListener("click", closeModal);
+
+    actions.appendChild(save);
+    actions.appendChild(reset);
+    actions.appendChild(cancel);
+    body.appendChild(actions);
+
+    openModal("Limits \u2014 " + (cfg.title || axisLabel(cfg.y) + " vs " + axisLabel(cfg.x)), body, null);
+}

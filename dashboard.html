@@ -35,6 +35,29 @@
         .log-table th.num, .log-table td.num { text-align: right; font-variant-numeric: tabular-nums; }
         .log-table tbody tr:nth-child(even) { background: #f8fafc; }
         .log-table td.dim { color: #94a3b8; }
+
+        /* per-graph buttons, pop-ups */
+        .card-tools { display: flex; gap: 6px; align-items: center; }
+        .tool-btn { padding: 3px 10px; font-size: 0.8rem; border: 1px solid #cbd5e1; background: #fff;
+                    border-radius: 6px; cursor: pointer; color: #334155; }
+        .tool-btn:hover { background: #f1f5f9; }
+        .modal-overlay { position: fixed; inset: 0; background: rgba(15, 23, 42, 0.45); z-index: 1000;
+                         display: flex; align-items: center; justify-content: center; padding: 16px; }
+        .modal-box { background: #fff; border-radius: 10px; width: min(760px, 100%); max-height: 88vh;
+                     display: flex; flex-direction: column; box-shadow: 0 10px 30px rgba(0,0,0,0.25); }
+        .modal-head { display: flex; align-items: center; justify-content: space-between; gap: 12px;
+                      padding: 12px 16px; border-bottom: 1px solid #e2e8f0; }
+        .modal-head h3 { margin: 0; font-size: 1.05rem; }
+        .modal-close { border: none; background: none; font-size: 1.6rem; line-height: 1; cursor: pointer; color: #64748b; }
+        .modal-body { padding: 14px 16px; overflow: auto; }
+        .modal-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+        .modal-table-wrap { max-height: 58vh; }
+        .modal-actions { display: flex; gap: 10px; margin-top: 14px; flex-wrap: wrap; }
+        .limit-field { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 12px 0 0; }
+        .limit-field input { width: 140px; padding: 6px 8px; }
+        .limit-check { display: block; margin-top: 14px; font-size: 0.9rem; color: #334155; }
+        .limit-msg { color: #dc2626; font-weight: 600; min-height: 1.2em; margin-top: 10px; }
+        .log-table td.out { color: #dc2626; font-weight: 700; }
     </style>
 </head>
 

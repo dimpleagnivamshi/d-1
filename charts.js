@@ -48,6 +48,61 @@ function buildPoints(rows, xKey, yKey) {
 
 const chartRegistry = {};
 
+/* Upper / lower limit lines: dotted horizontal lines drawn on the Y axis.
+   The limits live on the chart object (chart.limits = { lower, upper }). */
+const LIMIT_COLORS = { upper: "#dc2626", lower: "#d97706" };
+
+const limitLinesPlugin = {
+    id: "limitLines",
+    afterDatasetsDraw: function (chart) {
+        const area = chart.chartArea;
+        const yScale = chart.scales && chart.scales.y;
+        if (!area || !yScale || !chart.limits) return;
+        [["upper", "Upper"], ["lower", "Lower"]].forEach(function (pair) {
+            const value = chart.limits[pair[0]];
+            if (!Number.isFinite(value)) return;
+            const y = yScale.getPixelForValue(value);
+            if (!(y >= area.top && y <= area.bottom)) return;     // outside the view: not drawn
+            const ctx = chart.ctx;
+            ctx.save();
+            ctx.beginPath();
+            ctx.setLineDash([1, 5]);                              // dot - dot - dot
+            ctx.lineCap = "round";
+            ctx.lineWidth = 2;
+            ctx.strokeStyle = LIMIT_COLORS[pair[0]];
+            ctx.moveTo(area.left, y);
+            ctx.lineTo(area.right, y);
+            ctx.stroke();
+            ctx.setLineDash([]);
+            ctx.fillStyle = LIMIT_COLORS[pair[0]];
+            ctx.font = "11px sans-serif";
+            ctx.textAlign = "right";
+            ctx.fillText(pair[1] + " " + value, area.right - 4, pair[0] === "upper" ? y - 4 : y + 12);
+            ctx.restore();
+        });
+    }
+};
+
+/* make the Y axis include the limit lines (unless fitData: then it stays on the data) */
+function applyLimitBounds(chart, limits, fitData) {
+    const y = chart.options.scales.y;
+    const lo = limits && Number.isFinite(limits.lower) ? limits.lower : undefined;
+    const hi = limits && Number.isFinite(limits.upper) ? limits.upper : undefined;
+    if (!fitData && lo !== undefined) y.suggestedMin = lo; else delete y.suggestedMin;
+    if (!fitData && hi !== undefined) y.suggestedMax = hi; else delete y.suggestedMax;
+}
+
+function setChartLimits(canvasId, limits, fitData) {
+    const chart = chartRegistry[canvasId];
+    if (!chart) return;
+    chart.limits = {
+        lower: limits && Number.isFinite(limits.lower) ? limits.lower : undefined,
+        upper: limits && Number.isFinite(limits.upper) ? limits.upper : undefined
+    };
+    applyLimitBounds(chart, chart.limits, fitData);
+    chart.update("none");
+}
+
 function createChart(canvasId, rows, settings) {
     const canvas = document.getElementById(canvasId);
     if (!canvas) return null;
@@ -102,8 +157,10 @@ function createChart(canvasId, rows, settings) {
                 },
                 y: { title: { display: true, text: axisLabel(yKey) } }
             }
-        }
+        },
+        plugins: [limitLinesPlugin]
     });
+    setChartLimits(canvasId, settings.limits, settings.fitData === true);
     chartRegistry[canvasId].xKey = xKey;
     chartRegistry[canvasId].yKey = yKey;
     return chartRegistry[canvasId];
