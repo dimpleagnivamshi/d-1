@@ -21,6 +21,11 @@ async function initializeStorage() {
             payload JSONB NOT NULL
         )
     `);
+    // speeds up "last 1 week / 1 month" exports (a range search on the time column)
+    await pool.query(`
+        CREATE INDEX IF NOT EXISTS telemetry_active_stream_ts_idx
+        ON telemetry_active_stream ("timestamp")
+    `);
     await pool.query(`
         CREATE TABLE IF NOT EXISTS feed_state (
             key VARCHAR(50) PRIMARY KEY,
@@ -106,6 +111,74 @@ async function listReadings(options = 100) {
     }));
 }
 
+/* ---------- export of the recorded history for one graph ----------
+   hours   : how far back (null = everything that is recorded)
+   x, y    : column names of the graph ("timestamp" is allowed for x)
+   overlay : optional third column (e.g. the dP setpoint line), or null
+   At most EXPORT_MAX_ROWS rows are returned. If the period holds more readings,
+   they are averaged into equal time slots so the file still opens in Excel. */
+const EXPORT_MAX_ROWS = 200000;
+
+const EXPORT_SOURCE_SQL = `
+    WITH src AS (
+        SELECT id,
+               (EXTRACT(EPOCH FROM "timestamp") * 1000)::float8 AS t_ms,
+               CASE WHEN $2::text = 'timestamp'
+                    THEN (EXTRACT(EPOCH FROM "timestamp") * 1000)::float8
+                    ELSE (payload->>$2::text)::float8 END AS xv,
+               (payload->>$3::text)::float8 AS yv,
+               CASE WHEN $4::text IS NULL THEN NULL::float8
+                    ELSE (payload->>$4::text)::float8 END AS ov
+        FROM telemetry_active_stream
+        WHERE $1::float8 IS NULL OR "timestamp" >= NOW() - ($1::float8 * INTERVAL '1 hour')
+    )`;
+
+async function exportSeries({ hours, x, y, overlay }) {
+    const params = [hours === undefined ? null : hours, x, y, overlay || null];
+
+    const countRes = await pool.query(
+        EXPORT_SOURCE_SQL + `
+        SELECT COUNT(*)::int AS total, MIN(t_ms) AS first_ms, MAX(t_ms) AS last_ms
+        FROM src WHERE yv IS NOT NULL AND xv IS NOT NULL`,
+        params
+    );
+    const total = countRes.rows[0].total;
+    if (total === 0) return { rows: [], total: 0, returned: 0, bucketSeconds: 0, firstMs: null, lastMs: null };
+    const firstMs = Number(countRes.rows[0].first_ms);
+    const lastMs = Number(countRes.rows[0].last_ms);
+
+    let bucketSeconds = 0;
+    let res;
+    if (total <= EXPORT_MAX_ROWS) {
+        res = await pool.query({
+            text: EXPORT_SOURCE_SQL + `
+                SELECT xv, yv, ov FROM src
+                WHERE yv IS NOT NULL AND xv IS NOT NULL
+                ORDER BY id`,
+            values: params,
+            rowMode: "array"
+        });
+    } else {
+        bucketSeconds = Math.max(2, Math.ceil((lastMs - firstMs) / 1000 / EXPORT_MAX_ROWS));
+        res = await pool.query({
+            text: EXPORT_SOURCE_SQL + `,
+                b AS (
+                    SELECT *, FLOOR(t_ms / 1000 / $5::float8) AS bucket
+                    FROM src WHERE yv IS NOT NULL AND xv IS NOT NULL
+                )
+                SELECT CASE WHEN $2::text = 'timestamp'
+                            THEN MIN(bucket) * $5::float8 * 1000
+                            ELSE AVG(xv) END AS xv,
+                       AVG(yv) AS yv,
+                       AVG(ov) AS ov
+                FROM b GROUP BY bucket ORDER BY bucket`,
+            values: params.concat([bucketSeconds]),
+            rowMode: "array"
+        });
+    }
+    return { rows: res.rows, total, returned: res.rows.length, bucketSeconds, firstMs, lastMs };
+}
+
 async function closeStorage() {
     await pool.end();
 }
@@ -120,5 +193,7 @@ module.exports = {
     getLatestReading,
     getReadingCount,
     listReadings,
+    exportSeries,
+    EXPORT_MAX_ROWS,
     closeStorage
 };

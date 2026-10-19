@@ -877,18 +877,23 @@ function limitStatus(y, limits) {
 /* header + body cells for the graph table and the Excel export, built once */
 function buildGraphTable(cfg) {
     const data = graphRowsFor(cfg);
+    return makeGraphTable(cfg, data.rows, data.overlayKey);
+}
+
+/* rows = [{ x, y, ov }] in the order they should appear */
+function makeGraphTable(cfg, sourceRows, overlayKey) {
     const limits = getLimits(cfg);
     const hasLimits = Number.isFinite(limits.lower) || Number.isFinite(limits.upper);
     const head = [cfg.x === "timestamp" ? "Time" : axisLabel(cfg.x), axisLabel(cfg.y)];
-    if (data.overlayKey) head.push(axisLabel(data.overlayKey) + " (setpoint)");
+    if (overlayKey) head.push(axisLabel(overlayKey) + " (setpoint)");
     if (hasLimits) head.push("Limit status");
 
-    const rows = data.rows.map(function (r) {
+    const rows = sourceRows.map(function (r) {
         const cells = [
             cfg.x === "timestamp" ? formatByPrecision(r.x, cfg.timeFormat || "seconds") : formatGraphValue(cfg.x, r.x),
             formatGraphValue(cfg.y, r.y)
         ];
-        if (data.overlayKey) cells.push(formatGraphValue(data.overlayKey, r.ov));
+        if (overlayKey) cells.push(formatGraphValue(overlayKey, r.ov));
         const status = hasLimits ? limitStatus(r.y, limits) : null;
         if (hasLimits) cells.push(status);
         return { cells: cells, bad: status !== null && status !== "OK" };
@@ -907,9 +912,10 @@ function openTableModal(cfg) {
     const xlsBtn = document.createElement("button");
     xlsBtn.type = "button";
     xlsBtn.className = "tool-btn";
-    xlsBtn.textContent = "Download Excel";
+    xlsBtn.textContent = "Download these rows";
+    xlsBtn.title = "Excel file with exactly the rows shown here. Use Export for longer periods.";
     xlsBtn.addEventListener("click", function () {
-        const problem = exportGraphExcel(cfg);
+        const problem = exportShownRows(cfg);
         if (problem) note.textContent = problem;
     });
     bar.appendChild(note);
@@ -1066,8 +1072,23 @@ function openLimitsModal(cfg) {
 }
 
 /* =====================================================
-   EXPORT BUTTON: pick a graph by name, export its table
+   EXPORT BUTTON: pick a graph and a period, export every recorded reading
    ===================================================== */
+
+const EXPORT_PERIODS = [
+    { value: "1",    label: "Last 1 hour" },
+    { value: "6",    label: "Last 6 hours" },
+    { value: "12",   label: "Last 12 hours" },
+    { value: "24",   label: "Last 1 day" },
+    { value: "48",   label: "Last 2 days" },
+    { value: "72",   label: "Last 3 days" },
+    { value: "168",  label: "Last 1 week" },
+    { value: "336",  label: "Last 2 weeks" },
+    { value: "504",  label: "Last 3 weeks" },
+    { value: "720",  label: "Last 1 month" },
+    { value: "all",  label: "All recorded data" }
+];
+const EXPORT_PERIOD_KEY = "dashboard_export_period";
 
 function graphTitle(cfg) {
     return cfg.title || axisLabel(cfg.y) + " vs " + (cfg.x === "timestamp" ? "Time" : axisLabel(cfg.x));
@@ -1077,35 +1098,92 @@ function graphFileBase(cfg) {
     return graphTitle(cfg).replace(/[^\w\-]+/g, "_").replace(/^_+|_+$/g, "") || "graph";
 }
 
-/* the table of one graph as an Excel file (numbers stay numbers) */
-function downloadGraphExcel(cfg) {
-    const t = buildGraphTable(cfg);
-    const aoa = [t.head].concat(t.rows.map(function (r) {
+function periodLabel(value) {
+    const p = EXPORT_PERIODS.find(function (x) { return x.value === value; });
+    return p ? p.label : value;
+}
+
+/* write one table (and an optional "Info" sheet) to an Excel file; numbers stay numbers */
+function writeGraphWorkbook(cfg, table, infoRows, fileSuffix) {
+    const aoa = [table.head].concat(table.rows.map(function (r) {
         return r.cells.map(function (c) {
             const n = Number(c);
             return String(c).trim() !== "" && Number.isFinite(n) ? n : c;
         });
     }));
     const ws = XLSX.utils.aoa_to_sheet(aoa);
-    ws["!cols"] = t.head.map(function (h, i) {
+    ws["!cols"] = table.head.map(function (h, i) {
         let w = String(h).length;
-        t.rows.slice(0, 50).forEach(function (r) { w = Math.max(w, String(r.cells[i]).length); });
+        table.rows.slice(0, 50).forEach(function (r) { w = Math.max(w, String(r.cells[i]).length); });
         return { wch: Math.min(w + 2, 40) };
     });
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, graphTitle(cfg).replace(/[\[\]:*?\/\\]/g, " ").slice(0, 31));
-    XLSX.writeFile(wb, graphFileBase(cfg) + ".xlsx");
+    if (infoRows) {
+        const info = XLSX.utils.aoa_to_sheet(infoRows);
+        info["!cols"] = [{ wch: 30 }, { wch: 60 }];
+        XLSX.utils.book_append_sheet(wb, info, "Info");
+    }
+    XLSX.writeFile(wb, graphFileBase(cfg) + (fileSuffix || "") + ".xlsx");
 }
 
-/* exports one graph's table to Excel; returns a message if it could not, otherwise null */
-function exportGraphExcel(cfg) {
+/* the rows shown in the "Table" pop-up (what is drawn on the graph) */
+function exportShownRows(cfg) {
     if (graphRowsFor(cfg).rows.length === 0) return "\u201C" + graphTitle(cfg) + "\u201D has no data yet.";
     if (typeof XLSX === "undefined") return "The Excel library did not load. Check the connection and refresh the page.";
     try {
-        downloadGraphExcel(cfg);
+        writeGraphWorkbook(cfg, buildGraphTable(cfg), null, "");
         return null;
     } catch (err) {
         return "Export failed: " + err.message;
+    }
+}
+
+function formatCount(n) {
+    return Number(n).toLocaleString("en-US");
+}
+
+/* every recorded reading of the period, fetched from the server. Resolves with { ok, text } */
+async function exportGraphPeriod(cfg, period) {
+    if (typeof XLSX === "undefined") return { ok: false, text: "The Excel library did not load. Check the connection and refresh the page." };
+
+    const params = new URLSearchParams({ x: cfg.x, y: cfg.y, hours: period });
+    if (cfg.overlay) params.set("overlay", cfg.overlay);
+
+    let data;
+    try {
+        const res = await fetch("/api/export?" + params.toString(), { cache: "no-store" });
+        if (res.status === 404) return { ok: false, text: "The server has no export service yet. Update server.js and storage.js, then restart it." };
+        if (!res.ok) return { ok: false, text: "The server could not prepare the export (error " + res.status + ")." };
+        data = await res.json();
+    } catch (err) {
+        return { ok: false, text: "Could not reach the server: " + err.message };
+    }
+
+    if (!data.rows || data.rows.length === 0) return { ok: false, text: "No recorded data for \u201C" + graphTitle(cfg) + "\u201D in that period." };
+
+    try {
+        const rows = data.rows.map(function (r) { return { x: r[0], y: r[1], ov: r[2] }; });
+        const table = makeGraphTable(cfg, rows, cfg.overlay || null);
+        const averaged = data.bucketSeconds > 0;
+        const fmt = function (ms) { return formatByPrecision(ms, "seconds"); };
+        const info = [
+            ["Graph", graphTitle(cfg)],
+            ["Period", periodLabel(period)],
+            ["First reading in file", fmt(data.firstMs)],
+            ["Last reading in file", fmt(data.lastMs)],
+            ["Readings recorded in period", data.total],
+            ["Rows in this file", data.returned],
+            ["Averaging", averaged ? "Each row is the average of " + data.bucketSeconds + " seconds of readings" : "None - every recorded reading is listed"],
+            ["Exported at", fmt(Date.now())]
+        ];
+        writeGraphWorkbook(cfg, table, info, "_" + (period === "all" ? "all" : period + "h"));
+        return {
+            ok: true,
+            text: "Exported " + formatCount(data.returned) + " rows" + (averaged ? " (averaged over " + data.bucketSeconds + " s from " + formatCount(data.total) + " readings)" : "") + "."
+        };
+    } catch (err) {
+        return { ok: false, text: "Export failed: " + err.message };
     }
 }
 
@@ -1114,33 +1192,76 @@ function initExportMenu() {
     const menu = document.getElementById("exportMenu");
     if (!btn || !menu) return;
 
-    function showMsg(text) {
-        const el = menu.querySelector(".export-msg");
-        if (el) el.textContent = text;
+    let busy = false;
+
+    function savedPeriod() {
+        try {
+            const v = localStorage.getItem(EXPORT_PERIOD_KEY);
+            if (EXPORT_PERIODS.some(function (p) { return p.value === v; })) return v;
+        } catch (e) { /* ignore */ }
+        return "24";
     }
 
-    function exportGraph(cfg) {
-        const problem = exportGraphExcel(cfg);
-        if (problem) showMsg(problem); else menu.hidden = true;
+    function showMsg(text, ok) {
+        const el = menu.querySelector(".export-msg");
+        if (!el) return;
+        el.textContent = text;
+        el.classList.toggle("ok", ok === true);
+    }
+
+    function setBusy(flag) {
+        busy = flag;
+        menu.querySelectorAll("button, select").forEach(function (el) { el.disabled = flag; });
+    }
+
+    async function exportGraph(cfg, period) {
+        if (busy) return;
+        setBusy(true);
+        showMsg("Preparing \u201C" + graphTitle(cfg) + "\u201D (" + periodLabel(period).toLowerCase() + ")\u2026 this can take a little while for long periods.", true);
+        // let the message paint before the heavy work starts
+        await new Promise(function (r) { setTimeout(r, 30); });
+        const result = await exportGraphPeriod(cfg, period);
+        setBusy(false);
+        showMsg(result.text, result.ok);
     }
 
     function renderMenu() {
         menu.innerHTML = "";
         const head = document.createElement("div");
         head.className = "export-head";
-        head.textContent = "Choose a graph to export";
+        head.textContent = "Choose a graph and a period to export";
         menu.appendChild(head);
 
         dashboardCharts.forEach(function (cfg) {
             const row = document.createElement("div");
             row.className = "export-item";
+
             const name = document.createElement("span");
             name.className = "export-name";
             name.textContent = graphTitle(cfg);
+
+            const select = document.createElement("select");
+            select.className = "export-period";
+            select.title = "How far back to export";
+            EXPORT_PERIODS.forEach(function (p) {
+                const o = document.createElement("option");
+                o.value = p.value;
+                o.textContent = p.label;
+                select.appendChild(o);
+            });
+            select.value = savedPeriod();
+            select.addEventListener("change", function () {
+                try { localStorage.setItem(EXPORT_PERIOD_KEY, select.value); } catch (e) { /* ignore */ }
+            });
+
             const btns = document.createElement("span");
             btns.className = "export-btns";
-            btns.appendChild(makeToolButton("Excel", "Export this graph's table as an Excel file", function () { exportGraph(cfg); }));
+            btns.appendChild(makeToolButton("Excel", "Export every recorded reading of this graph for the chosen period", function () {
+                exportGraph(cfg, select.value);
+            }));
+
             row.appendChild(name);
+            row.appendChild(select);
             row.appendChild(btns);
             menu.appendChild(row);
         });
@@ -1157,13 +1278,13 @@ function initExportMenu() {
 
     btn.addEventListener("click", function (event) {
         event.stopPropagation();
-        if (menu.hidden) { renderMenu(); menu.hidden = false; } else { menu.hidden = true; }
+        if (menu.hidden) { renderMenu(); menu.hidden = false; } else if (!busy) { menu.hidden = true; }
     });
     document.addEventListener("click", function (event) {
-        if (!menu.hidden && !menu.contains(event.target)) menu.hidden = true;
+        if (!menu.hidden && !busy && !menu.contains(event.target)) menu.hidden = true;
     });
     document.addEventListener("keydown", function (event) {
-        if (event.key === "Escape") menu.hidden = true;
+        if (event.key === "Escape" && !busy) menu.hidden = true;
     });
 }
 

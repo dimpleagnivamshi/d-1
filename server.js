@@ -46,6 +46,22 @@ async function main() {
 
             if (url.pathname === "/api/stream") return stream.handle(req, res, url);
 
+            // every recorded reading of one graph for a period, used by the dashboard's Export button
+            //   /api/export?x=timestamp&y=P1&overlay=TCS_dP_P1_P2&hours=168   (hours=all for everything)
+            if (url.pathname === "/api/export") {
+                const KEYS = ["P1", "P2", "dP", "RPM", "Flow", "dP_SetpointDiff", "TCS_dP_P1_P2", "ConstDP", "ConstFlow"];
+                const x = url.searchParams.get("x") || "timestamp";
+                const y = url.searchParams.get("y") || "";
+                const overlay = url.searchParams.get("overlay") || null;
+                const hoursParam = url.searchParams.get("hours") || "24";
+                const hours = hoursParam === "all" ? null : Number(hoursParam);
+                if ((x !== "timestamp" && !KEYS.includes(x)) || !KEYS.includes(y) || (overlay && !KEYS.includes(overlay)))
+                    return sendJson(400, { error: "Unknown column" });
+                if (hours !== null && !(hours > 0 && hours <= 24 * 3650))
+                    return sendJson(400, { error: "Bad period" });
+                return sendJson(200, await storage.exportSeries({ hours, x, y, overlay }));
+            }
+
             // manual setpoints: { mode: "dp" | "flow", constDp: bar, constFlow: L/min }
             if (url.pathname === "/api/setpoint") {
                 if (req.method === "GET") return sendJson(200, engine.getControl());
