@@ -874,7 +874,7 @@ function limitStatus(y, limits) {
     return "OK";
 }
 
-/* header + body cells for the table and the CSV, built once */
+/* header + body cells for the graph table and the Excel export, built once */
 function buildGraphTable(cfg) {
     const data = graphRowsFor(cfg);
     const limits = getLimits(cfg);
@@ -896,20 +896,6 @@ function buildGraphTable(cfg) {
     return { head: head, rows: rows, limits: limits };
 }
 
-function downloadGraphCsv(cfg) {
-    const t = buildGraphTable(cfg);
-    const esc = function (v) { return '"' + String(v).replace(/"/g, '""') + '"'; };
-    const lines = [t.head.map(esc).join(",")].concat(t.rows.map(function (r) { return r.cells.map(esc).join(","); }));
-    const blob = new Blob([lines.join("\r\n")], { type: "text/csv;charset=utf-8" });
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = graphFileBase(cfg) + ".csv";
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    setTimeout(function () { URL.revokeObjectURL(a.href); }, 1000);
-}
-
 function openTableModal(cfg) {
     const body = document.createElement("div");
     body.className = "modal-body";
@@ -918,13 +904,16 @@ function openTableModal(cfg) {
     bar.className = "modal-bar";
     const note = document.createElement("span");
     note.className = "log-count";
-    const csvBtn = document.createElement("button");
-    csvBtn.type = "button";
-    csvBtn.className = "tool-btn";
-    csvBtn.textContent = "Download CSV";
-    csvBtn.addEventListener("click", function () { downloadGraphCsv(cfg); });
+    const xlsBtn = document.createElement("button");
+    xlsBtn.type = "button";
+    xlsBtn.className = "tool-btn";
+    xlsBtn.textContent = "Download Excel";
+    xlsBtn.addEventListener("click", function () {
+        const problem = exportGraphExcel(cfg);
+        if (problem) note.textContent = problem;
+    });
     bar.appendChild(note);
-    bar.appendChild(csvBtn);
+    bar.appendChild(xlsBtn);
 
     const wrap = document.createElement("div");
     wrap.className = "log-table-wrap modal-table-wrap";
@@ -1108,6 +1097,18 @@ function downloadGraphExcel(cfg) {
     XLSX.writeFile(wb, graphFileBase(cfg) + ".xlsx");
 }
 
+/* exports one graph's table to Excel; returns a message if it could not, otherwise null */
+function exportGraphExcel(cfg) {
+    if (graphRowsFor(cfg).rows.length === 0) return "\u201C" + graphTitle(cfg) + "\u201D has no data yet.";
+    if (typeof XLSX === "undefined") return "The Excel library did not load. Check the connection and refresh the page.";
+    try {
+        downloadGraphExcel(cfg);
+        return null;
+    } catch (err) {
+        return "Export failed: " + err.message;
+    }
+}
+
 function initExportMenu() {
     const btn = document.getElementById("btnExportGraph");
     const menu = document.getElementById("exportMenu");
@@ -1118,15 +1119,9 @@ function initExportMenu() {
         if (el) el.textContent = text;
     }
 
-    function exportGraph(cfg, kind) {
-        if (graphRowsFor(cfg).rows.length === 0) { showMsg("\u201C" + graphTitle(cfg) + "\u201D has no data yet."); return; }
-        if (kind === "xlsx" && typeof XLSX === "undefined") { showMsg("The Excel library did not load. Use CSV instead."); return; }
-        try {
-            if (kind === "xlsx") downloadGraphExcel(cfg); else downloadGraphCsv(cfg);
-            menu.hidden = true;
-        } catch (err) {
-            showMsg("Export failed: " + err.message);
-        }
+    function exportGraph(cfg) {
+        const problem = exportGraphExcel(cfg);
+        if (problem) showMsg(problem); else menu.hidden = true;
     }
 
     function renderMenu() {
@@ -1144,8 +1139,7 @@ function initExportMenu() {
             name.textContent = graphTitle(cfg);
             const btns = document.createElement("span");
             btns.className = "export-btns";
-            btns.appendChild(makeToolButton("Excel", "Export this graph's table as an Excel file", function () { exportGraph(cfg, "xlsx"); }));
-            btns.appendChild(makeToolButton("CSV", "Export this graph's table as a CSV file", function () { exportGraph(cfg, "csv"); }));
+            btns.appendChild(makeToolButton("Excel", "Export this graph's table as an Excel file", function () { exportGraph(cfg); }));
             row.appendChild(name);
             row.appendChild(btns);
             menu.appendChild(row);
