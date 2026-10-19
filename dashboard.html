@@ -58,6 +58,22 @@
         .limit-check { display: block; margin-top: 14px; font-size: 0.9rem; color: #334155; }
         .limit-msg { color: #dc2626; font-weight: 600; min-height: 1.2em; margin-top: 10px; }
         .log-table td.out { color: #dc2626; font-weight: 700; }
+
+        /* export button + graph list */
+        .export-wrap { position: relative; display: inline-block; }
+        .btn-export { padding: 10px 20px; background: #0f766e; color: #fff; border: none; border-radius: 6px;
+                      cursor: pointer; font-weight: bold; }
+        .btn-export:hover { background: #115e59; }
+        .export-menu { position: absolute; top: 100%; left: 0; margin-top: 8px; width: 380px; max-width: 90vw;
+                       background: #fff; border: 1px solid #e2e8f0; border-radius: 10px; z-index: 900;
+                       box-shadow: 0 10px 30px rgba(0,0,0,0.18); overflow: hidden; }
+        .export-head { padding: 10px 14px; font-weight: 700; background: #f1f5f9; border-bottom: 1px solid #e2e8f0; }
+        .export-item { display: flex; align-items: center; justify-content: space-between; gap: 10px;
+                       padding: 9px 14px; border-bottom: 1px solid #f1f5f9; }
+        .export-item:last-of-type { border-bottom: none; }
+        .export-name { font-size: 0.92rem; color: #0f172a; }
+        .export-btns { display: flex; gap: 6px; flex-shrink: 0; }
+        .export-msg { padding: 8px 14px; font-size: 0.85rem; color: #dc2626; min-height: 1.1em; }
     </style>
 </head>
 
@@ -100,6 +116,12 @@
         </label>
         <button id="btnApplySetpoint" style="padding: 10px 20px; background: #2563eb; color: #fff; border: none; border-radius: 6px; cursor: pointer; font-weight: bold;">Apply</button>
         <span id="spMsg" style="font-weight: bold;"></span>
+
+        <!-- EXPORT ONE GRAPH'S TABLE: pick the graph by name -->
+        <span class="export-wrap">
+            <button id="btnExportGraph" type="button" class="btn-export">&#8681; Export</button>
+            <div id="exportMenu" class="export-menu" hidden></div>
+        </span>
     </div>
 
     <!-- GRAPHS VIEW -->

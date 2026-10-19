@@ -903,7 +903,7 @@ function downloadGraphCsv(cfg) {
     const blob = new Blob([lines.join("\r\n")], { type: "text/csv;charset=utf-8" });
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
-    a.download = (cfg.title || axisLabel(cfg.y) + " vs " + axisLabel(cfg.x)).replace(/[^\w\-]+/g, "_") + ".csv";
+    a.download = graphFileBase(cfg) + ".csv";
     document.body.appendChild(a);
     a.click();
     a.remove();
@@ -1075,3 +1075,102 @@ function openLimitsModal(cfg) {
 
     openModal("Limits \u2014 " + (cfg.title || axisLabel(cfg.y) + " vs " + axisLabel(cfg.x)), body, null);
 }
+
+/* =====================================================
+   EXPORT BUTTON: pick a graph by name, export its table
+   ===================================================== */
+
+function graphTitle(cfg) {
+    return cfg.title || axisLabel(cfg.y) + " vs " + (cfg.x === "timestamp" ? "Time" : axisLabel(cfg.x));
+}
+
+function graphFileBase(cfg) {
+    return graphTitle(cfg).replace(/[^\w\-]+/g, "_").replace(/^_+|_+$/g, "") || "graph";
+}
+
+/* the table of one graph as an Excel file (numbers stay numbers) */
+function downloadGraphExcel(cfg) {
+    const t = buildGraphTable(cfg);
+    const aoa = [t.head].concat(t.rows.map(function (r) {
+        return r.cells.map(function (c) {
+            const n = Number(c);
+            return String(c).trim() !== "" && Number.isFinite(n) ? n : c;
+        });
+    }));
+    const ws = XLSX.utils.aoa_to_sheet(aoa);
+    ws["!cols"] = t.head.map(function (h, i) {
+        let w = String(h).length;
+        t.rows.slice(0, 50).forEach(function (r) { w = Math.max(w, String(r.cells[i]).length); });
+        return { wch: Math.min(w + 2, 40) };
+    });
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, graphTitle(cfg).replace(/[\[\]:*?\/\\]/g, " ").slice(0, 31));
+    XLSX.writeFile(wb, graphFileBase(cfg) + ".xlsx");
+}
+
+function initExportMenu() {
+    const btn = document.getElementById("btnExportGraph");
+    const menu = document.getElementById("exportMenu");
+    if (!btn || !menu) return;
+
+    function showMsg(text) {
+        const el = menu.querySelector(".export-msg");
+        if (el) el.textContent = text;
+    }
+
+    function exportGraph(cfg, kind) {
+        if (graphRowsFor(cfg).rows.length === 0) { showMsg("\u201C" + graphTitle(cfg) + "\u201D has no data yet."); return; }
+        if (kind === "xlsx" && typeof XLSX === "undefined") { showMsg("The Excel library did not load. Use CSV instead."); return; }
+        try {
+            if (kind === "xlsx") downloadGraphExcel(cfg); else downloadGraphCsv(cfg);
+            menu.hidden = true;
+        } catch (err) {
+            showMsg("Export failed: " + err.message);
+        }
+    }
+
+    function renderMenu() {
+        menu.innerHTML = "";
+        const head = document.createElement("div");
+        head.className = "export-head";
+        head.textContent = "Choose a graph to export";
+        menu.appendChild(head);
+
+        dashboardCharts.forEach(function (cfg) {
+            const row = document.createElement("div");
+            row.className = "export-item";
+            const name = document.createElement("span");
+            name.className = "export-name";
+            name.textContent = graphTitle(cfg);
+            const btns = document.createElement("span");
+            btns.className = "export-btns";
+            btns.appendChild(makeToolButton("Excel", "Export this graph's table as an Excel file", function () { exportGraph(cfg, "xlsx"); }));
+            btns.appendChild(makeToolButton("CSV", "Export this graph's table as a CSV file", function () { exportGraph(cfg, "csv"); }));
+            row.appendChild(name);
+            row.appendChild(btns);
+            menu.appendChild(row);
+        });
+        if (dashboardCharts.length === 0) {
+            const empty = document.createElement("div");
+            empty.className = "export-item";
+            empty.textContent = "There are no graphs to export.";
+            menu.appendChild(empty);
+        }
+        const msg = document.createElement("div");
+        msg.className = "export-msg";
+        menu.appendChild(msg);
+    }
+
+    btn.addEventListener("click", function (event) {
+        event.stopPropagation();
+        if (menu.hidden) { renderMenu(); menu.hidden = false; } else { menu.hidden = true; }
+    });
+    document.addEventListener("click", function (event) {
+        if (!menu.hidden && !menu.contains(event.target)) menu.hidden = true;
+    });
+    document.addEventListener("keydown", function (event) {
+        if (event.key === "Escape") menu.hidden = true;
+    });
+}
+
+initExportMenu();
