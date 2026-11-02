@@ -153,4 +153,25 @@ async function main() {
         } catch (error) {
             console.error("Request failed:", error);
             if (!res.headersSent) res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
-            if (!res.destroyed) res.end(JSON.stringify({ error: "Internal
+            if (!res.destroyed) res.end(JSON.stringify({ error: "Internal server error" }));
+        }
+    });
+
+    server.listen(config.port, config.host, () => {
+        console.log(`Sensor app listening on ${config.host}:${config.port}`);
+    });
+
+    const shutdown = async () => {
+        engine.stop();
+        server.close();
+        await storage.closeStorage();
+        process.exit(0);
+    };
+    process.on("SIGINT", shutdown);
+    process.on("SIGTERM", shutdown);
+}
+
+main().catch((error) => {
+    console.error("Backend startup failed:", error.message);
+    process.exitCode = 1;
+});
