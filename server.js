@@ -2,9 +2,8 @@ const http = require("node:http");
 const fs = require("node:fs");
 const path = require("node:path");
 
-try { process.loadEnvFile(); } catch { /* .env optional (env vars are set on the host) */ }
-
 const projectRoot = __dirname;
+
 const mime = {
     ".html": "text/html; charset=utf-8",
     ".js": "text/javascript; charset=utf-8",
@@ -12,110 +11,110 @@ const mime = {
     ".json": "application/json; charset=utf-8"
 };
 
-async function main() {
-    const storage = require("./storage");
-    const { FailoverEngine } = require("./generator");
-    const { createStreamHub } = require("./stream");
+// Only these files can be downloaded by the browser (server code stays private)
+const PUBLIC = new Set([
+    "/index.html", "/dashboard.html", "/dashboard-2.html", "/pressure.html", "/style.css",
+    "/pages.js", "/nav.js", "/charts.js", "/realtime.js", "/data.js", "/explorer.js",
+    "/dashboard.js", "/dashboard-2.js", "/pressure.js"
+]);
 
-    await storage.initializeStorage();          // creates tables in Neon
+function loadConfig() {
+    const envFile = path.resolve(projectRoot, ".env");
+    if (fs.existsSync(envFile) && typeof process.loadEnvFile === "function") {
+        process.loadEnvFile(envFile);
+    }
+    if (!process.env.DATABASE_URL) {
+        throw new Error("DATABASE_URL is required (set it in .env or the Voroa environment).");
+    }
+    return {
+        host: (process.env.HOST || "0.0.0.0").trim(),
+        port: Number(process.env.PORT || 3000)
+    };
+}
 
-    const stream = createStreamHub();
-    const engine = new FailoverEngine(stream);
-    await engine.init();                        // load last manual const dP / const flow
-    await storage.setFeedState(true, {});       // D1 starts healthy
-    engine.start();
-
-    const server = http.createServer(async (req, res) => {
-        try {
-            const url = new URL(req.url, "http://" + (req.headers.host || "localhost"));
-            const sendJson = (code, body) => {
-                res.writeHead(code, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
-                res.end(JSON.stringify(body));
-            };
-
-            if (url.pathname === "/healthz") return sendJson(200, { status: "ok" });
-
-            if (url.pathname === "/api/status") return sendJson(200, await engine.getStatus());
-
-            if (url.pathname === "/api/readings") {
-                const limit = Math.min(Number(url.searchParams.get("limit")) || 100, 5000);
-                const rows = await storage.listReadings(limit);
-                const latestId = rows.length ? rows[rows.length - 1].id : 0;
-                return sendJson(200, { rows, count: latestId, latestId });
-            }
-
-            if (url.pathname === "/api/stream") return stream.handle(req, res, url);
-
-            // every recorded reading of one graph for a period, used by the dashboard's Export button
-            //   /api/export?x=timestamp&y=P1&overlay=TCS_dP_P1_P2&hours=168   (hours=all for everything)
-            if (url.pathname === "/api/export") {
-                const KEYS = ["P1", "P2", "dP", "RPM", "Flow", "dP_SetpointDiff", "TCS_dP_P1_P2", "ConstDP", "ConstFlow"];
-                const x = url.searchParams.get("x") || "timestamp";
-                const y = url.searchParams.get("y") || "";
-                const overlay = url.searchParams.get("overlay") || null;
-                const hoursParam = url.searchParams.get("hours") || "24";
-                const hours = hoursParam === "all" ? null : Number(hoursParam);
-                if ((x !== "timestamp" && !KEYS.includes(x)) || !KEYS.includes(y) || (overlay && !KEYS.includes(overlay)))
-                    return sendJson(400, { error: "Unknown column" });
-                if (hours !== null && !(hours > 0 && hours <= 24 * 3650))
-                    return sendJson(400, { error: "Bad period" });
-                return sendJson(200, await storage.exportSeries({ hours, x, y, overlay }));
-            }
-
-            // manual setpoints: { mode: "dp" | "flow", constDp: bar, constFlow: L/min }
-            if (url.pathname === "/api/setpoint") {
-                if (req.method === "GET") return sendJson(200, engine.getControl());
-                if (req.method === "POST") {
-                    let body = "";
-                    for await (const chunk of req) body += chunk;
-                    let parsed;
-                    try { parsed = JSON.parse(body); } catch { return sendJson(400, { error: "Invalid JSON" }); }
-                    const result = await engine.setControl(parsed);
-                    if (!result.ok) return sendJson(400, { error: result.error });
-                    return sendJson(200, { success: true, ...result.value });
-                }
-            }
-
-            if (req.method === "POST" && url.pathname === "/api/device1/interrupt") {
-                let body = "";
-                for await (const chunk of req) body += chunk;
-                let parsed;
-                try { parsed = JSON.parse(body); } catch { return sendJson(400, { error: "Invalid JSON" }); }
-                const result = await engine.setDevice1State(!parsed.interrupt);
-                return sendJson(200, { success: true, interrupted: Boolean(parsed.interrupt), ...result });
-            }
-
-            serveStatic(url.pathname, res);
-        } catch (error) {
-            console.error("Request failed:", error);
-            if (!res.headersSent) res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
-            res.end(JSON.stringify({ error: "Internal server error" }));
-        }
+function send(res, status, body) {
+    res.writeHead(status, {
+        "Content-Type": "application/json; charset=utf-8",
+        "Cache-Control": "no-store"
     });
+    res.end(JSON.stringify(body));
+}
 
-    const port = process.env.PORT || 3000;
-    server.listen(port, "0.0.0.0", () => console.log(`Failover telemetry server on port ${port}`));
-
-    process.on("SIGTERM", async () => {
-        engine.stop();
-        await storage.closeStorage();
-        process.exit(0);
+function readBody(req) {
+    return new Promise((resolve, reject) => {
+        let data = "";
+        req.on("data", c => {
+            data += c;
+            if (data.length > 10000) { reject(new Error("Body too large")); req.destroy(); }
+        });
+        req.on("end", () => {
+            try { resolve(data ? JSON.parse(data) : {}); }
+            catch { reject(new Error("Invalid JSON")); }
+        });
     });
+}
+
+async function handleApi(req, res, url, engine, stream, storage) {
+    const p = url.pathname;
+
+    if (req.method === "GET" && p === "/api/status") {
+        return send(res, 200, await engine.getStatus());
+    }
+    if (req.method === "GET" && p === "/api/feed/status") {
+        const s = await engine.getStatus();
+        return send(res, 200, { running: s.device1Active });
+    }
+    if (req.method === "GET" && p === "/api/readings") {
+        const limit = Number(url.searchParams.get("limit")) || 1000;
+        const beforeId = url.searchParams.has("beforeId") ? Number(url.searchParams.get("beforeId")) : null;
+        const afterId = url.searchParams.has("afterId") ? Number(url.searchParams.get("afterId")) : null;
+        const rows = await storage.listReadings({ limit, beforeId, afterId });
+        return send(res, 200, {
+            rows,
+            count: await storage.getReadingCount(),
+            latestId: rows.length ? rows[rows.length - 1].id : 0
+        });
+    }
+    if (req.method === "GET" && p === "/api/stream") {
+        return stream.handle(req, res, url);
+    }
+    if (req.method === "GET" && p === "/api/setpoint") {
+        return send(res, 200, engine.getControl());
+    }
+    if (req.method === "POST" && p === "/api/device1/interrupt") {
+        let body;
+        try { body = await readBody(req); } catch (e) { return send(res, 400, { error: e.message }); }
+        const status = await engine.setDevice1State(!body.interrupt);
+        console.log("Device 1 interrupted:", !status.device1Active);
+        return send(res, 200, { success: true, interrupted: !status.device1Active });
+    }
+    if (req.method === "POST" && p === "/api/setpoint") {
+        let body;
+        try { body = await readBody(req); } catch (e) { return send(res, 400, { error: e.message }); }
+        const result = await engine.setControl(body);
+        if (!result.ok) return send(res, 400, { error: result.error });
+        return send(res, 200, result.value);
+    }
+
+    // >>> If your OLD server.js had an Excel export route (using storage.exportSeries),
+    // >>> copy it here, before "return false".
+
+    return false;
 }
 
 function serveStatic(requestPath, res) {
     let decoded;
-    try { decoded = decodeURIComponent(requestPath); } catch { res.writeHead(400); return res.end("Bad path"); }
+    try { decoded = decodeURIComponent(requestPath); }
+    catch { res.writeHead(400); return res.end("Bad path"); }
 
     if (decoded === "/") decoded = "/dashboard.html";
 
-    const file = path.resolve(projectRoot, "." + decoded);
-    if (!file.startsWith(projectRoot) || !fs.existsSync(file)) {
-        res.writeHead(404);
-        return res.end("Not found");
-    }
+    if (!PUBLIC.has(decoded)) { res.writeHead(404); return res.end("Not found"); }
 
-    const type = mime[path.extname(file).toLowerCase()] || "text/plain";
+    const file = path.join(projectRoot, decoded);
+    const type = mime[path.extname(file).toLowerCase()];
+    if (!type || !fs.existsSync(file)) { res.writeHead(404); return res.end("Not found"); }
+
     fs.readFile(file, (error, content) => {
         if (error) { res.writeHead(500); return res.end("Read error"); }
         res.writeHead(200, { "Content-Type": type, "Cache-Control": "no-cache" });
@@ -123,4 +122,35 @@ function serveStatic(requestPath, res) {
     });
 }
 
-main().catch(err => { console.error("Startup failed:", err); process.exit(1); });
+async function main() {
+    const config = loadConfig();
+    const storage = require("./storage");
+    const { FailoverEngine } = require("./generator");
+    const { createStreamHub } = require("./stream");
+
+    await storage.initializeStorage();
+    const stream = createStreamHub(storage);
+    const engine = new FailoverEngine(stream);
+    await engine.init();
+    engine.start();
+
+    const server = http.createServer(async (req, res) => {
+        try {
+            const url = new URL(req.url, "http://" + (req.headers.host || "localhost"));
+
+            if (req.method === "GET" && url.pathname === "/healthz") {
+                return send(res, 200, { status: "ok" });
+            }
+
+            if (url.pathname.startsWith("/api/")) {
+                // CORS: the page is served from this same server, so no cross-origin access is granted
+                if (req.method === "OPTIONS") { res.writeHead(204); return res.end(); }
+                const handled = await handleApi(req, res, url, engine, stream, storage);
+                if (handled !== false) return;
+                return send(res, 404, { error: "API route not found" });
+            }
+            serveStatic(url.pathname, res);
+        } catch (error) {
+            console.error("Request failed:", error);
+            if (!res.headersSent) res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
+            if (!res.destroyed) res.end(JSON.stringify({ error: "Internal

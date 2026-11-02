@@ -93,21 +93,30 @@ async function getReadingCount() {
 }
 
 async function listReadings(options = 100) {
-    let limit = 100;
-    if (typeof options === 'object' && options !== null) {
-        limit = options.limit || 100;
-    } else if (typeof options === 'number') {
-        limit = options;
-    }
+    const o = (typeof options === "object" && options) ? options : { limit: options };
+    const limit = Math.max(1, Math.min(Number(o.limit) || 100, 5000));
+    let res, reverse = false;
 
-    const res = await pool.query(
-        "SELECT id, timestamp, payload FROM telemetry_active_stream ORDER BY id DESC LIMIT $1",
-        [limit]
-    );
-    return res.rows.reverse().map(row => ({
-        id: row.id,
-        timestamp: row.timestamp,
-        ...(typeof row.payload === 'object' ? row.payload : JSON.parse(row.payload))
+    if (o.afterId != null) {
+        res = await pool.query(
+            "SELECT id, timestamp, payload FROM telemetry_active_stream WHERE id > $1 ORDER BY id ASC LIMIT $2",
+            [o.afterId, limit]);
+    } else if (o.beforeId != null) {
+        res = await pool.query(
+            "SELECT id, timestamp, payload FROM telemetry_active_stream WHERE id < $1 ORDER BY id DESC LIMIT $2",
+            [o.beforeId, limit]);
+        reverse = true;
+    } else {
+        res = await pool.query(
+            "SELECT id, timestamp, payload FROM telemetry_active_stream ORDER BY id DESC LIMIT $1",
+            [limit]);
+        reverse = true;
+    }
+    const rows = reverse ? res.rows.reverse() : res.rows;
+    return rows.map(r => ({
+        id: r.id,
+        timestamp: r.timestamp,
+        ...(typeof r.payload === "object" ? r.payload : JSON.parse(r.payload))
     }));
 }
 
